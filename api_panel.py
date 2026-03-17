@@ -1,0 +1,1867 @@
+# ===============================
+# IMPORTS PRINCIPALES
+# ===============================
+
+from cryptography.fernet import Fernet
+import json
+from fastapi import FastAPI, Query
+from fastapi.responses import HTMLResponse
+import cx_Oracle
+import pandas as pd
+import folium
+import math
+from folium.plugins import HeatMap, MarkerCluster
+import os
+from dotenv import load_dotenv
+from fastapi import Request
+
+sesiones = {}
+usuarios_activos = {}
+sids_usados = set()
+MAX_SESIONES = 3
+
+# ===============================
+# CARGAR VARIABLES
+# ===============================
+
+load_dotenv()
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+fernet = Fernet(SECRET_KEY)
+
+# ===============================
+# INICIALIZAR API
+# ===============================
+
+app = FastAPI()
+
+# ===============================
+# CONFIGURACIÓN BASE DE DATOS
+# ===============================
+
+ORACLE_USER = os.getenv("ORACLE_USER1")
+ORACLE_PASS = os.getenv("ORACLE_PASS1")
+ORACLE_DSN  = os.getenv("ORACLE_DSN1")
+
+print("Usuario Oracle:", ORACLE_USER)
+print("DSN Oracle:", ORACLE_DSN)
+
+try:
+    conn = cx_Oracle.connect(ORACLE_USER, ORACLE_PASS, ORACLE_DSN)
+    print("✅ Conexión Oracle exitosa")
+    conn.close()
+except Exception as e:
+    print("❌ Error conexión Oracle:", e)
+
+# ===============================
+# FUNCIONES TOKEN
+# ===============================
+
+def desencriptar_token(token):
+
+    try:
+
+        datos = fernet.decrypt(token.encode())
+        parametros = json.loads(datos.decode())
+
+        return parametros
+
+    except:
+        return None
+
+
+def generar_token(encuesta, usuario, correlativo=None, modalidad=None):
+
+    datos = {
+        "encuesta": encuesta,
+        "usuario": usuario,
+        "correlativo": correlativo,
+        "modalidad": modalidad
+    }
+
+    token = fernet.encrypt(json.dumps(datos).encode())
+
+    return token.decode()
+
+
+import base64
+from fastapi.responses import RedirectResponse
+import uuid
+
+@app.get("/login_panel")
+def login_panel(request: Request, token: str):
+
+    try:
+        decoded = base64.b64decode(token).decode()
+        parts = decoded.split("|")
+
+        encuesta = parts[0]
+        usuario = parts[1]
+        correlativo = parts[2] if len(parts) > 2 else None
+
+    except:
+        return {"error": "token inválido"}
+
+    ip = request.client.host
+    clave = ip   # 🔥 CONTROL GLOBAL POR USUARIO/NAVEGADOR
+
+    # crear registro usuario
+    if clave not in usuarios_activos:
+        usuarios_activos[clave] = []
+
+    # limpiar sesiones inexistentes
+    usuarios_activos[clave] = [
+        s for s in usuarios_activos[clave] if s in sesiones
+    ]
+
+    # 🔒 límite máximo
+    if len(usuarios_activos[clave]) >= 3:
+
+        return HTMLResponse(
+            f"""
+            <h3>Límite de sesiones alcanzado</h3>
+             YA  tiene 3 paneles abiertos.<br>
+            Cierre uno antes de abrir otro.
+            """
+        )
+
+    # crear nueva sesión
+    token_seguro = generar_token(encuesta, usuario, correlativo)
+
+    sid = str(uuid.uuid4())
+
+    sesiones[sid] = token_seguro
+    usuarios_activos[clave].append(sid)
+
+    print("SID creado:", sid)
+    print("Sesiones activas:", usuarios_activos)
+
+    return RedirectResponse(url=f"/panel?sid={sid}", status_code=302)
+
+# ===============================
+# ENDPOINT PRINCIPAL PANEL
+# ===============================
+
+# ===============================
+# ENDPOINT PRINCIPAL PANEL
+# ===============================
+
+
+@app.get("/panel", response_class=HTMLResponse)
+def panel(request: Request, sid: str = Query(...)):
+
+    coords_log_por_caso = {}
+
+    # ===============================
+    # VALIDAR SID
+    # ===============================
+
+    if sid not in sesiones:
+        return HTMLResponse("⚠ Sesión inválida")
+
+    # 🔒 EVITAR MISMO SID EN 2 PESTAÑAS
+    if sid in sids_usados:
+        return HTMLResponse("⚠ Esta sesión ya está abierta en otra pestaña")
+
+    sids_usados.add(sid)
+
+    # ===============================
+    # DESENCRIPTAR TOKEN
+    # ===============================
+
+    token = sesiones[sid]
+
+    datos = desencriptar_token(token)
+
+    if not datos:
+        return HTMLResponse("Token inválido")
+
+    usuario = datos.get("usuario")
+    usuario = usuario.strip().upper() if usuario else None
+
+    # 👉 YA NO USAMOS usuario+ip
+    ip = request.client.host
+    clave = ip   # 🔥 CONTROL GLOBAL
+
+    encuesta = datos.get("encuesta")
+    correlativo = datos.get("correlativo")
+    modalidad = datos.get("modalidad")
+
+    print("Encuesta:", encuesta)
+    print("Usuario:", usuario)
+    print("Correlativo:", correlativo)
+
+
+    @app.get("/cerrar_panel")
+    def cerrar_panel(sid: str):
+
+        if sid in sesiones:
+
+            token = sesiones.pop(sid)
+
+            datos = desencriptar_token(token)
+
+            if datos:
+                usuario = datos.get("usuario")
+
+                for clave in usuarios_activos:
+                    if sid in usuarios_activos[clave]:
+                        usuarios_activos[clave].remove(sid)
+
+        # 🔥 AGREGAR ESTO (CLAVE)
+        if sid in sids_usados:
+            sids_usados.remove(sid)
+
+        print("Sesiones activas:", usuarios_activos)
+        print("SIDs usados:", sids_usados)
+
+        return {"ok": True}
+
+    # ===============================
+    # MENSAJES HTML
+    # ===============================
+
+    mensaje_error = ""
+
+    conn = cx_Oracle.connect(ORACLE_USER, ORACLE_PASS, ORACLE_DSN)
+    cursor = conn.cursor()
+
+    cursor.arraysize = 500
+
+ # ===============================
+# DETECTAR SCHEMA
+# ===============================
+
+    schema = None
+
+    # buscar en ECH
+    cursor.execute("""
+        SELECT 1
+        FROM ECHPROD.DOMICILIOS
+        WHERE TRIM(CFGENCUESTA) = :cfg
+        AND ROWNUM = 1
+    """, {"cfg": encuesta})
+
+    row = cursor.fetchone()
+
+    if row:
+        schema = "ECHPROD"
+    else:
+        # buscar en SMR
+        cursor.execute("""
+            SELECT 1
+            FROM SMRPROD.DOMICILIOS
+            WHERE TRIM(CFGENCUESTA) = :cfg
+            AND ROWNUM = 1
+        """, {"cfg": encuesta})
+
+        row = cursor.fetchone()
+
+        if row:
+            schema = "SMRPROD"
+
+    print("Schema detectado:", schema)
+
+         # ===============================
+    # VALIDAR ENCUESTA
+    # ===============================
+
+    cursor.execute(f"""
+    SELECT COUNT(*)
+    FROM {schema}.DOMICILIOS
+    WHERE RTRIM(CFGENCUESTA) = :encuesta
+    """, {"encuesta": encuesta})
+
+    row = cursor.fetchone()
+    total_encuesta = row[0] if row else 0
+
+    if total_encuesta == 0:
+
+        mensaje_error += f"""
+        <div style="
+            position: fixed;
+            top: 90px;
+            left: 50%;
+            transform: translateX(-50%);
+            background:#ffe6e6;
+            padding:10px 20px;
+            border:1px solid red;
+            border-radius:8px;
+            z-index:9999;
+            font-size:14px;
+            font-weight:bold;">
+            ⚠ Encuesta <b>{encuesta}</b> no existe
+        </div>
+        """
+   
+
+
+     
+    # ===============================
+    # NOMBRE USUARIO
+    # ===============================
+    
+    cursor.execute(f"""
+        SELECT INEUSRNOMBRE
+        FROM {schema}.INEUSUARIOS
+        WHERE TRIM(INEUSRUSUARIO) = :usuario
+    """, {"usuario": usuario})
+
+    row_nombre = cursor.fetchone()
+    nombre = row_nombre[0] if row_nombre else usuario
+
+    # ===============================
+    # CONSULTA DOMICILIOS DEL USUARIO
+    # ===============================
+
+          # ===============================
+    # CONSULTA DOMICILIOS DEL USUARIO
+    # ===============================
+
+    sql = f"""
+    SELECT
+        d.DOMCORRELATIVO,
+        d.DOMUBICACION,
+        d.DOMNOMCALLE,
+        d.DOMNROPUERTA,
+        d.DOMMODALIDAD,
+        d.DOMESTADO
+    FROM {schema}.DOMICILIOS d
+    WHERE TRIM(d.CFGENCUESTA) = :cfg
+    AND TRIM(UPPER(d.DOMUSRENCUESTADOR)) = :usuario
+    AND d.DOMUBICACION IS NOT NULL
+    """
+
+    params = {
+        "cfg": encuesta,
+        "usuario": usuario
+    }
+
+    # si viene correlativo agregamos filtro
+    if correlativo:
+        sql += " AND TRIM(d.DOMCORRELATIVO) = :correlativo"
+        params["correlativo"] = correlativo
+
+    cursor.execute(sql, params)
+
+    rows = cursor.fetchall()
+
+    print("Filas encontradas:", len(rows))
+
+        # ===============================
+    # VALIDAR USUARIO
+    # ===============================
+
+    if len(rows) == 0:
+
+        mensaje_error += f"""
+        <div style="
+            position: fixed;
+            top: 130px;
+            left: 50%;
+            transform: translateX(-50%);
+            background:#fff3cd;
+            padding:10px 20px;
+            border:1px solid orange;
+            border-radius:8px;
+            z-index:9999;
+            font-size:14px;">
+            ⚠ Usuario <b>{usuario}</b> no tiene domicilios en esta encuesta
+        </div>
+        """
+    print("Encuesta:", encuesta)
+    print("Usuario:", usuario)
+    print("Correlativo:", correlativo)
+
+    df_dom = pd.DataFrame(rows, columns=[col[0] for col in cursor.description])
+
+    # limpiar espacios de campos CHAR de Oracle
+    df_dom = df_dom.map(lambda x: x.strip() if isinstance(x, str) else x)
+    correlativos = df_dom["DOMCORRELATIVO"].unique().tolist()
+
+    # ===============================
+    # FILTRO POR CORRELATIVO
+    # ===============================
+
+    if correlativo and correlativo.upper() != "TODO":
+        df_dom["DOMCORRELATIVO"] = df_dom["DOMCORRELATIVO"].astype(str).str.strip()
+        correlativo = correlativo.strip()
+        df_dom = df_dom[df_dom["DOMCORRELATIVO"] == correlativo]
+
+    # ===============================
+    # FILTRO POR MODALIDAD
+    # ===============================
+
+    if modalidad in ("P", "T"):
+        df_dom = df_dom[df_dom["DOMMODALIDAD"] == modalidad]
+
+    # ===============================
+    # LOG
+    # ===============================
+
+    # ===============================
+    # LOG
+    # ===============================
+
+    usuario = usuario.strip().upper()
+    encuesta = encuesta.strip().upper()
+
+    print("Encuesta:", encuesta)
+    print("Usuario:", usuario)
+
+    # -------------------------------
+    # Diagnóstico: total logs usuario
+    # -------------------------------
+    cursor.execute(f"""
+    SELECT
+        DOMCORRELATIVO,
+        LOGTIPO,
+        LOGFECHAHORA,
+        LOGACCION,
+        LOGUBICACION
+    FROM {schema}.LOG
+    WHERE RTRIM(CFGENCUESTA) = :cfg
+    AND (
+            RTRIM(LOGDOMUSUARIO) = :usuario
+        OR RTRIM(LOGUSRUSUARIO) = :usuario
+    )
+    AND LOGUBICACION IS NOT NULL
+    ORDER BY LOGFECHAHORA
+    """, {
+        "cfg": encuesta,
+        "usuario": usuario
+    })
+
+    rows_log = cursor.fetchall()
+
+    df_log = pd.DataFrame(rows_log, columns=[col[0] for col in cursor.description])
+    df_log["LOGFECHAHORA"] = pd.to_datetime(df_log["LOGFECHAHORA"], errors="coerce")
+    df_log = df_log.dropna(subset=["LOGFECHAHORA"])
+
+    print("Filas LOG:", len(df_log))
+
+    coords_log_por_caso = {}
+
+    if not df_log.empty:
+
+        # limpiar strings rápido
+        for col in df_log.select_dtypes(include="object"):
+            df_log[col] = df_log[col].str.strip()
+
+        # convertir fecha
+        df_log["LOGFECHAHORA"] = pd.to_datetime(df_log["LOGFECHAHORA"], errors="coerce")
+
+        df_log["DOMCORRELATIVO"] = df_log["DOMCORRELATIVO"].astype(str).str.strip()
+
+
+     # ===============================
+        # LIMPIAR COORDENADAS GPS
+        # ===============================
+
+        coords_log_por_caso = {}
+
+    if not df_log.empty:
+
+        df_log["LOGUBICACION"] = df_log["LOGUBICACION"].astype(str)
+
+        df_log = df_log[df_log["LOGUBICACION"].str.contains(",", na=False)]
+
+        if not df_log.empty:
+
+            coords = df_log["LOGUBICACION"].str.split(",", expand=True)
+
+            if coords.shape[1] >= 2:
+
+                df_log["LAT_LOG"] = pd.to_numeric(coords[0], errors="coerce")
+                df_log["LON_LOG"] = pd.to_numeric(coords[1], errors="coerce")
+
+                df_log = df_log.dropna(subset=["LAT_LOG","LON_LOG"])
+
+                if not df_log.empty:
+
+                    df_log["DOMCORRELATIVO"] = df_log["DOMCORRELATIVO"].astype(str).str.strip()
+
+                    coords_log_por_caso = (
+                        df_log
+                        .groupby("DOMCORRELATIVO")[["LAT_LOG","LON_LOG"]]
+                        .apply(lambda x: x.values.tolist())
+                        .to_dict()
+                    )
+
+            # COORDENADAS POR CASO
+            # ===============================
+
+        else:
+            print("⚠️ No se encontraron logs con GPS para este usuario")
+
+
+
+
+                    
+        # ===============================
+        # OBTENER VERSION OFICIAL METADATA
+        # ===============================
+
+    cursor.execute(f"""
+            SELECT VERSIONID, VERSIONFECHA
+            FROM {schema}.VERSIONES           
+            WHERE CFGENCUESTA = :cfg
+            AND VERSIONMETADATOS = 1
+            AND VERSIONESTADO = 'A'
+            ORDER BY VERSIONFECHA DESC
+        """, {"cfg": encuesta})
+
+    row_version = cursor.fetchone()
+
+    if row_version:
+            VERSION_OFICIAL = row_version[0].strip()
+            FECHA_VERSION_OFICIAL = pd.to_datetime(row_version[1])
+    else:
+                VERSION_OFICIAL = None
+                FECHA_VERSION_OFICIAL = None
+
+        # ===============================
+        # FILTRO LOG POR CORRELATIVO
+        # ===============================
+
+    if correlativo and correlativo.upper() != "TODO":
+            df_log["DOMCORRELATIVO"] = df_log["DOMCORRELATIVO"].astype(str).str.strip()
+            df_log = df_log[
+                (df_log["DOMCORRELATIVO"] == correlativo) |
+                (df_log["DOMCORRELATIVO"].isna())
+            ]
+
+    conn.close()
+
+    # ===============================
+    # FILTRO LOG SEGÚN MODALIDAD
+    # ===============================
+
+    if modalidad in ("P", "T") and not df_dom.empty:
+
+        correlativos_validos = df_dom["DOMCORRELATIVO"].unique()
+
+        df_log = df_log[
+            (df_log["DOMCORRELATIVO"].isin(correlativos_validos)) |
+            (df_log["DOMCORRELATIVO"].isna())
+        ]
+
+    # ===============================
+    # VALIDACIÓN DOMICILIOS
+    # ===============================
+
+        if df_dom.empty:
+            mensaje_error += """
+            <div style="
+                position: fixed;
+                top: 120px;
+                left: 50%;
+                transform: translateX(-50%);
+                background:#ffe6e6;
+                padding:12px 20px;
+                border:1px solid red;
+                border-radius:8px;
+                z-index:9999;
+                font-size:14px;
+                font-weight:bold;">
+                ⚠ No hay domicilios para este usuario
+            </div>
+    """
+
+     # ===============================
+# LIMPIEZA DOMICILIOS SEGURA
+# ===============================
+
+    if df_dom.empty:
+        mensaje_error = "⚠ No hay domicilios para este usuario"
+
+    else:
+
+        df_dom = df_dom[df_dom["DOMUBICACION"].str.contains(",", na=False)]
+
+        if df_dom.empty:
+            mensaje_error = "⚠ Los domicilios no tienen coordenadas válidas"
+
+        else:
+
+            coords = df_dom["DOMUBICACION"].str.split(",", expand=True)
+
+            if coords.shape[1] == 2:
+
+                df_dom["LAT"] = pd.to_numeric(coords[0].str.strip(), errors="coerce")
+                df_dom["LON"] = pd.to_numeric(coords[1].str.strip(), errors="coerce")
+
+                df_dom = df_dom.dropna(subset=["LAT","LON"])
+
+            else:
+                mensaje_error = "⚠ Error en formato de coordenadas"
+
+       # ===============================
+    # MAPA VACÍO SI NO HAY DATOS
+    # ===============================
+
+    if df_dom.empty:
+
+        mapa = folium.Map(
+            location=[-34.90, -56.16],  # Montevideo
+            zoom_start=6
+        )
+
+
+# ===============================
+# LIMPIEZA LOG SEGURA
+# ===============================
+
+    heat_data = []
+
+    if not df_log.empty:
+
+        df_log["LOGUBICACION"] = df_log["LOGUBICACION"].astype(str)
+
+        df_log = df_log[df_log["LOGUBICACION"].str.contains(",", na=False)]
+
+        coords = df_log["LOGUBICACION"].str.split(",", expand=True)
+
+        if coords.shape[1] >= 2:
+
+            df_log["LAT_LOG"] = pd.to_numeric(coords[0].str.strip(), errors="coerce")
+            df_log["LON_LOG"] = pd.to_numeric(coords[1].str.strip(), errors="coerce")
+
+            df_log = df_log.dropna(subset=["LAT_LOG","LON_LOG"])
+
+            heat_data = df_log[["LAT_LOG","LON_LOG"]].values.tolist()
+
+        else:
+            print("⚠ LOGUBICACION con formato inválido")
+
+        # ===============================
+        # 🔥 NORMALIZAR CORRELATIVOS
+        # ===============================
+
+        df_dom["DOMCORRELATIVO"] = df_dom["DOMCORRELATIVO"].astype(str).str.strip()
+        df_log["DOMCORRELATIVO"] = df_log["DOMCORRELATIVO"].astype(str).str.strip()
+
+    # ===============================
+    # 🔥 AGRUPAR LOG POR HOGAR
+    # ===============================
+
+    log_por_hogar = {
+        k: v.sort_values("LOGFECHAHORA")
+        for k, v in df_log.groupby("DOMCORRELATIVO")
+    }
+     
+      # ===============================
+    # ÚLTIMA VERSION ENVIADA POR HOGAR
+    # ===============================
+
+    df_env = df_log[df_log["LOGTIPO"] == "ENV"].copy()
+
+    df_env["VERSION_METADATA"] = df_env["LOGACCION"].str.extract(r"\((.*?)\)")
+    df_env = df_env.sort_values("LOGFECHAHORA")
+
+    ultimo_env_por_hogar = (
+        df_env
+        .dropna(subset=["VERSION_METADATA"])
+        .groupby("DOMCORRELATIVO")
+        .last()
+    )
+
+    # ===============================
+# 🔥 AGRUPAR LOG POR HOGAR
+# ===============================
+
+    log_por_hogar = {
+        k: v.sort_values("LOGFECHAHORA")
+        for k, v in df_log.groupby("DOMCORRELATIVO")
+    }
+
+# ===============================
+# 🔥 DETECTAR VERSIONES USADAS EN LOG
+# ===============================
+
+    df_env = df_log[df_log["LOGTIPO"] == "ENV"].copy()
+
+    # Extraer versión entre paréntesis
+    df_env["VERSION_METADATA"] = df_env["LOGACCION"].str.extract(r"\((.*?)\)")
+
+    # Obtener última versión usada por cada domicilio
+    version_por_hogar = (
+        df_env
+        .dropna(subset=["VERSION_METADATA"])
+        .sort_values("LOGFECHAHORA")
+        .groupby("DOMCORRELATIVO")["VERSION_METADATA"]
+        .last()
+        .to_dict()
+    )
+
+
+    # ===============================
+    # MÉTRICAS DE ACTIVIDAD
+    # ===============================
+
+    from datetime import datetime, timedelta
+
+    ahora = datetime.now()
+    hoy = ahora.date()
+    hace_7_dias = ahora - timedelta(days=7)
+
+    # Actividad últimos 7 días
+    actividad_7_dias = df_log[df_log["LOGFECHAHORA"] >= hace_7_dias]
+
+    total_eventos_7_dias = len(actividad_7_dias)
+    hogares_7_dias = actividad_7_dias["DOMCORRELATIVO"].nunique()
+
+    # Hogares trabajados hoy
+    actividad_hoy = df_log[
+        df_log["LOGFECHAHORA"].dt.date == hoy
+    ]
+
+    hogares_hoy = actividad_hoy["DOMCORRELATIVO"].nunique()
+    eventos_hoy = len(actividad_hoy)
+
+        # ===============================
+        # CONTADORES
+        # ===============================
+
+    cant_presenciales = len(df_dom[df_dom["DOMMODALIDAD"] == "P"])
+    cant_telefonicos = len(df_dom[df_dom["DOMMODALIDAD"] == "T"])
+    total = len(df_dom)
+        
+    cant_presenciales = len(df_dom[df_dom["DOMMODALIDAD"] == "P"])
+    cant_telefonicos = len(df_dom[df_dom["DOMMODALIDAD"] == "T"])
+    total = len(df_dom)
+
+    # ===============================
+    # DICCIONARIO DE ESTADOS
+    # ===============================
+
+    nombres_estados = {
+        "SA": "Sin Asignar",
+        "DI": "Para Distribuir",
+        "AE": "Asignada a Encuestador/a",
+        "PU": "Publicada",
+        "DE": "Descargada",
+        "NO": "Notificada",
+        "PE": "Pendiente",
+        "IN": "Incompleta",
+        "CR": "Criticada",
+        "PD": "Para Devolver",
+        "EC": "Enviada",
+        "ED": "Devuelta",
+        "RE": "Recibida",
+        "RD": "Recibida Devuelta",
+        "SU": "Para supervisar",
+        "PC": "Para codificar",
+        "PT": "Para criticar",
+        "CP": "En crítica (Pendiente)",
+        "CN": "En crítica (Consulta)",
+        "CO": "Criticada Oficina",
+        "AA": "Archivada con Alertas",
+        "AT": "Archivada Crítica",
+        "NA": "No Aceptada / Descartada",
+        "JU": "En Jurídica"
+    }
+
+    # ===============================
+    # DESGLOSE POR ESTADO
+    # ===============================
+
+    conteo_estados = df_dom["DOMESTADO"].value_counts()
+
+    estados_html = " | ".join(
+        [
+            f"{estado} - {nombres_estados.get(estado, 'Desconocido')}: {cantidad}"
+            for estado, cantidad in conteo_estados.items()
+        ]
+    )
+
+    # ===============================
+    # HEATMAP POR MODALIDAD
+    # ===============================
+
+    heat_presencial = []
+    heat_telefonico = []
+
+    if not df_log.empty:
+
+        df_log_modal = df_log.merge(
+            df_dom[["DOMCORRELATIVO", "DOMMODALIDAD"]],
+            on="DOMCORRELATIVO",
+            how="left"
+        )
+
+        heat_presencial = df_log_modal[
+            df_log_modal["DOMMODALIDAD"] == "P"
+        ][["LAT_LOG","LON_LOG"]].values.tolist()
+
+        heat_telefonico = df_log_modal[
+            df_log_modal["DOMMODALIDAD"] == "T"
+        ][["LAT_LOG","LON_LOG"]].values.tolist()
+
+
+    # ===============================
+    # CENTRO DEL MAPA
+    # ===============================
+
+    # ===============================
+    # CENTRO DEL MAPA SEGURO
+    # ===============================
+
+    if df_dom.empty or "LAT" not in df_dom.columns:
+        centro = [-34.9011, -56.1645]  # Montevideo por defecto
+    else:
+        centro = [df_dom["LAT"].mean(), df_dom["LON"].mean()]
+
+    # ===============================
+    # MAPA BASE PROFESIONAL
+    # ===============================
+
+    mapa = folium.Map(
+        location=centro,
+        zoom_start=10,
+        tiles="OpenStreetMap",   # 👈 Abre con calles visibles
+        control_scale=True
+    )
+
+    # 🔥 AQUI VA
+    from folium.plugins import MiniMap
+
+    MiniMap(
+        position="bottomleft",
+        toggle_display=True,
+        minimized=False
+    ).add_to(mapa)
+
+
+    # ===============================
+    # CAPAS EXTRA
+    # ===============================
+
+    # 🏙️ Mapa Claro
+    folium.TileLayer(
+        "CartoDB positron",
+        name="🏙️ Mapa Claro",
+        overlay=False,
+        control=True
+    ).add_to(mapa)
+
+    # 🌙 Modo Oscuro
+    folium.TileLayer(
+        "CartoDB dark_matter",
+        name="🌙 Modo Oscuro",
+        overlay=False,
+        control=True
+    ).add_to(mapa)
+
+    # 🛰️ Satélite
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri World Imagery",
+        name="🛰️ Satélite",
+        overlay=False,
+        control=True
+    ).add_to(mapa)
+
+    # 🛰️🌍 Etiquetas (para usar encima del satélite)
+    folium.TileLayer(
+        tiles="https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri Labels",
+        name="🛰️🌍 Etiquetas",
+        overlay=True,
+        control=True
+    ).add_to(mapa)
+
+
+        # ===============================
+    # HEATMAP SOLO DEL CASO BUSCADO
+    # ===============================
+
+    print("DEBUG correlativo:", correlativo)
+    print("DEBUG df_log vacío:", df_log.empty)
+    print("DEBUG total logs:", len(df_log))       
+    heat_caso = []
+
+    if correlativo and not df_log.empty:
+
+        correlativo = str(correlativo).strip()
+
+        df_log["DOMCORRELATIVO"] = df_log["DOMCORRELATIVO"].astype(str).str.strip()
+
+        df_caso = df_log[
+            df_log["DOMCORRELATIVO"] == correlativo
+        ]
+
+        print("🔥 puntos GPS del caso:", len(df_caso))
+
+        if not df_caso.empty:
+
+            heat_caso = df_caso[["LAT_LOG","LON_LOG"]].values.tolist()
+            print("🔥 heat_caso:", len(heat_caso)) 
+
+
+
+    # ===============================
+    # HEATMAP SEPARADO
+    # ===============================
+
+    fg_heat_presencial = folium.FeatureGroup(
+    name="🔥 Mapa Calor Presenciales",
+    show=True
+    )
+    fg_heat_presencial._name = "heat_presencial"
+
+
+    fg_heat_telefonico = folium.FeatureGroup(
+    name="🔥 Mapa Calor Telefónicas",
+    show=True
+    )
+    fg_heat_telefonico._name = "heat_telefonico"
+
+
+    fg_heat_caso = folium.FeatureGroup(
+        name="🎯 Mapa Calor del Caso",
+        show=False
+    )
+    fg_heat_caso._name = "heat_caso"
+
+
+
+    if heat_presencial:
+        HeatMap(
+            heat_presencial,
+            radius=18,
+            blur=25,
+            min_opacity=0.3
+        ).add_to(fg_heat_presencial)
+
+    if heat_telefonico:
+        HeatMap(
+            heat_telefonico,
+            radius=18,
+            blur=25,
+            min_opacity=0.3
+        ).add_to(fg_heat_telefonico)
+
+
+    if heat_caso:
+
+        # 🔥 mapa de calor
+        HeatMap(
+                    heat_caso,
+                    radius=90,
+                    blur=45,
+                    min_opacity=0.6,
+                    max_zoom=17,
+                    gradient={
+                        0.2: 'blue',
+                        0.4: 'lime',
+                        0.6: 'yellow',
+                        0.8: 'orange',
+                        1: 'red'
+                    }
+                ).add_to(fg_heat_caso)
+
+            # 📍 puntos GPS reales del encuestador
+        for lat, lon in heat_caso:
+                folium.CircleMarker(
+                    location=[lat, lon],
+                    radius=4,
+                    color="yellow",
+                    fill=True,
+                    fill_color="yellow",
+                    fill_opacity=0.9
+                ).add_to(fg_heat_caso)
+
+
+
+    
+
+    fg_heat_presencial.add_to(mapa)
+    fg_heat_telefonico.add_to(mapa)
+    fg_heat_caso.add_to(mapa)
+    # ===============================
+    # CAPAS POR MODALIDAD
+    # ===============================
+
+    fg_presencial = folium.FeatureGroup(
+        name=f"🏠 Presenciales ({cant_presenciales})",
+        show=not correlativo
+    )
+
+    fg_telefonico = folium.FeatureGroup(
+        name=f"📱 Telefónicas ({cant_telefonicos})",
+        show=not correlativo
+    )
+
+
+  
+    cluster_presencial = MarkerCluster(
+        disableClusteringAtZoom=12,
+        spiderfyOnMaxZoom=True,
+        showCoverageOnHover=False
+    ).add_to(fg_presencial)
+
+    cluster_telefonico = MarkerCluster(
+        disableClusteringAtZoom=12,
+        spiderfyOnMaxZoom=True,
+        showCoverageOnHover=False
+    ).add_to(fg_telefonico)
+
+    
+        # ===============================
+        # MARCADORES   
+        # ===============================
+
+    import math
+    coords_por_hogar = {}
+    desactualizados = []
+
+    for i, (_, row) in enumerate(df_dom.iterrows()):
+
+        estado = row["DOMESTADO"]
+        hogar = str(row["DOMCORRELATIVO"])
+
+        registro_env = (
+            ultimo_env_por_hogar.loc[hogar]
+            if hogar in ultimo_env_por_hogar.index
+            else None
+        )
+
+        version_usada = None
+        fecha_envio = None
+
+        if registro_env is not None:
+            version_usada = registro_env["VERSION_METADATA"]
+            fecha_envio = registro_env["LOGFECHAHORA"]
+
+        version_correcta = True
+
+        if (
+            VERSION_OFICIAL
+            and FECHA_VERSION_OFICIAL is not None
+            and version_usada
+            and fecha_envio is not None
+        ):
+            version_limpia = version_usada.split("-")[-1].strip()
+
+            if (
+                fecha_envio > FECHA_VERSION_OFICIAL
+                and version_limpia != VERSION_OFICIAL.strip()
+            ):
+                version_correcta = False
+
+        if not version_correcta:
+            desactualizados.append({
+                "hogar": hogar,
+                "usada": version_usada,
+                "oficial": VERSION_OFICIAL
+            })
+
+        modalidad = "Presencial" if row["DOMMODALIDAD"] == "P" else "Telefónica"
+
+        eventos = log_por_hogar.get(hogar)
+
+        historial = """
+        <details>
+            <summary><b>📜 Historial</b></summary>
+            <div style="
+                max-height:180px;
+                overflow-y:auto;
+                margin-top:6px;
+                padding:6px;
+                border:1px solid #ddd;
+                border-radius:6px;
+                background:#f8f9fa;
+                font-size:12px;
+            ">
+        """
+
+        if eventos is not None and not eventos.empty:
+            for _, ev in eventos.iterrows():
+                historial += f"{ev['LOGFECHAHORA']} - {ev['LOGTIPO']} - {ev['LOGACCION']}<br>"
+        else:
+            historial += "Sin registros"
+
+        historial += "</details>"
+
+        if modalidad == "Presencial":
+            color = "green"
+            emoji = "🏠"
+            destino = cluster_presencial
+        else:
+            color = "blue"
+            emoji = "☎️"
+            destino = cluster_telefonico
+
+        angle = (i * 30) % 360
+        radius = 0.00022
+
+        lat = row["LAT"] + radius * math.cos(math.radians(angle))
+        lon = row["LON"] + radius * math.sin(math.radians(angle))
+
+        coords_por_hogar[hogar] = {"lat": lat, "lon": lon}
+
+        popup_html = f"""
+        <div style="font-size:13px; width:340px">
+            <b>🏠 Domicilio:</b> {hogar}<br>
+            <b>📍 Dirección:</b> {row['DOMNOMCALLE']} {row['DOMNROPUERTA']}<br>
+            <b>📌 Modalidad:</b> {modalidad}<br>
+            <b>📊 Estado:</b> {estado}<br>
+            <b>🧩 Metadata:</b> {version_usada if version_usada else 'Sin registro'}<br>
+            <b>📌 Oficial:</b> {VERSION_OFICIAL if VERSION_OFICIAL else 'No definida'}<br>
+            {'<span style="color:red;font-weight:bold;">⚠ Versión desactualizada</span><br>' if not version_correcta else ''}
+            <hr>
+            {historial}
+        </div>
+        """
+
+        folium.Marker(
+            location=[lat, lon],
+            popup=popup_html,
+            tooltip=f"{modalidad} - {hogar}",
+            icon=folium.DivIcon(html=f"""
+                <div class="marker-estado marker-estado-{estado}">
+                    <span>{emoji}</span>
+                    <span style="
+                        font-size:10px;
+                        font-weight:bold;
+                        color:#fff;
+                        background:{color};
+                        padding:3px 8px;
+                        border-radius:8px;">
+                        {hogar}
+                    </span>
+                </div>
+            """)
+        ).add_to(destino)
+    # ===============================
+    # AGREGAR CAPAS AL MAPA (FUERA DEL FOR)
+    # ===============================
+
+    fg_presencial.add_to(mapa)
+    fg_telefonico.add_to(mapa)
+
+    folium.LayerControl(
+        position="topright",
+        collapsed=False
+    ).add_to(mapa)
+    
+    # ===============================
+# TITULO SUPERIOR
+# ===============================
+
+    titulo_html = f"""
+            <h3 style="text-align:center; margin-top:10px;">
+            📍 Panel Territorial — {usuario} - {nombre}<br>
+            🏠 Presenciales: {cant_presenciales} |
+            ☎️ Telefónicas: {cant_telefonicos} |
+            📊 Total: {total}
+            <br>
+            </h3>
+    """
+
+    mapa.get_root().html.add_child(folium.Element(f"""
+    <div style="
+        position: fixed;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: white;
+        padding: 12px 25px;
+        border-radius: 10px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        z-index: 9999;
+        text-align:center;
+        font-size:14px;
+    ">
+        📍 <b>Panel Territorial — {usuario} - {nombre}</b><br>
+        🏠 Presenciales: <b>{cant_presenciales}</b> |
+        ☎️ Telefónicas: <b>{cant_telefonicos}</b> |
+        📊 Total: <b>{total}</b>
+    </div>
+    """))
+
+    mapa.get_root().html.add_child(folium.Element("""
+    <style>
+
+    .leaflet-container {
+        margin-bottom: 90px;
+    }
+
+    /*  FILA ACTIVA */
+   .estado-activo {
+    background: linear-gradient(135deg,#ffc107,#ffca2c) !important;
+    color: black !important;
+    font-weight: bold;
+    }
+
+    /* Texto blanco dentro de la fila */
+    .estado-activo td {
+        color: white !important;
+    }
+
+    /* Hover suave */
+    #panelEstados tbody tr {
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }
+
+    #panelEstados tbody tr:hover {
+        background: #e9ecef;
+    }
+
+    </style>
+"""))
+
+# ===============================
+# ===============================
+# BUSCADOR MOVIBLE
+# ===============================
+
+  # ===============================
+# BUSCADOR MOVIBLE
+# ===============================
+
+    import json
+
+    coords_json = json.dumps(coords_por_hogar)
+    logs_json = json.dumps(coords_log_por_caso)
+    mostrar_buscador = not correlativo
+    map_name = mapa.get_name()
+
+    buscador_html = f"""
+<div id="buscadorMovible" style="
+    display: {'flex' if mostrar_buscador else 'none'};
+    position: fixed;
+    bottom: 500px;
+    right: 20px;
+    z-index:9999;
+    align-items:center;
+    gap:10px;
+">
+
+    <div style="
+        display:flex;
+        align-items:center;
+        gap:6px;
+        background:white;
+        padding:10px;
+        border-radius:12px;
+        box-shadow:0 4px 12px rgba(0,0,0,0.3);
+    ">
+
+        <input id="buscarHogar" type="text"
+            placeholder="Buscar correlativo..."
+            style="
+                padding:6px;
+                width:220px;
+                border:1px solid #ccc;
+                border-radius:6px;
+                outline:none;
+        ">
+
+        <button onclick="buscarHogar()" style="
+            padding:6px 12px;
+            border:none;
+            background:#0d6efd;
+            color:white;
+            border-radius:6px;
+            cursor:pointer;">
+            Buscar
+        </button>
+
+    </div>
+</div>
+
+<script>
+
+const hogares = {coords_json};
+const logsCasos = {logs_json};
+
+let circuloBusqueda = null;
+let heatCaso = null;
+
+function buscarHogar() {{
+
+    const input = document.getElementById("buscarHogar");
+    const valor = input.value.trim();
+    const mapa = window["{map_name}"];
+
+    if (!mapa) {{
+        alert("Mapa no cargado aún");
+        return;
+    }}
+
+    // ===============================
+    // LIMPIAR BUSQUEDA
+    // ===============================
+
+    if (valor === "") {{
+
+        if (circuloBusqueda) {{
+            mapa.removeLayer(circuloBusqueda);
+            circuloBusqueda = null;
+        }}
+
+        if (heatCaso) {{
+            mapa.removeLayer(heatCaso);
+            heatCaso = null;
+        }}
+
+        mapa.eachLayer(function(layer){{
+
+            if(layer._name === "heat_presencial"){{
+                mapa.addLayer(layer)
+            }}
+
+            if(layer._name === "heat_telefonico"){{
+                mapa.addLayer(layer)
+            }}
+
+        }})
+
+        return;
+    }}
+
+    // ===============================
+    // BUSCAR CORRELATIVO
+    // ===============================
+
+    if (hogares[valor]) {{
+
+        const lat = hogares[valor].lat;
+        const lon = hogares[valor].lon;
+
+        mapa.setView([lat, lon], 18);
+
+        console.log("correlativo buscado:", valor);
+        console.log("logs del caso:", logsCasos[valor]);
+
+        if (circuloBusqueda) {{
+            mapa.removeLayer(circuloBusqueda);
+        }}
+
+        circuloBusqueda = L.circle([lat, lon], {{
+            color: 'red',
+            fillColor: '#ff0000',
+            fillOpacity: 0.3,
+            radius: 80
+        }}).addTo(mapa);
+
+        // ===============================
+        // HEATMAP DEL CASO
+        // ===============================
+
+        if (heatCaso) {{
+            mapa.removeLayer(heatCaso);
+        }}
+
+        if (logsCasos[valor]) {{
+
+            heatCaso = L.heatLayer(logsCasos[valor], {{
+                radius: 60,
+                blur: 40,
+                maxZoom: 18,
+                gradient: {{
+                    0.2: 'blue',
+                    0.4: 'lime',
+                    0.6: 'yellow',
+                    0.8: 'orange',
+                    1.0: 'red'
+                }}
+            }}).addTo(mapa);
+
+            // puntos GPS reales
+            logsCasos[valor].forEach(function(p){{
+
+                L.circleMarker(p,{{
+                    radius:4,
+                    color:'yellow',
+                    fillColor:'yellow',
+                    fillOpacity:0.9
+                }}).addTo(mapa);
+
+            }});
+        }}
+
+        mapa.eachLayer(function(layer){{
+
+            if(layer._name === "heat_presencial"){{
+                mapa.removeLayer(layer)
+            }}
+
+            if(layer._name === "heat_telefonico"){{
+                mapa.removeLayer(layer)
+            }}
+
+        }})
+
+    }} else {{
+
+        alert("Correlativo no encontrado");
+
+    }}
+
+}}
+
+document.addEventListener("DOMContentLoaded", function(){{
+
+    const input = document.getElementById("buscarHogar");
+
+    if (input) {{
+        input.addEventListener("keypress", function(e){{
+            if (e.key === "Enter"){{
+                buscarHogar();
+            }}
+        }});
+    }}
+
+    const dragElement = document.getElementById("buscadorMovible");
+
+    let offsetX = 0;
+    let offsetY = 0;
+    let isDragging = false;
+
+    dragElement.addEventListener("mousedown", function(e){{
+
+        if (e.target.tagName === "INPUT" || e.target.tagName === "BUTTON"){{
+            return;
+        }}
+
+        isDragging = true;
+        offsetX = e.clientX - dragElement.offsetLeft;
+        offsetY = e.clientY - dragElement.offsetTop;
+    }});
+
+    document.addEventListener("mousemove", function(e){{
+        if (isDragging){{
+            dragElement.style.left = (e.clientX - offsetX) + "px";
+            dragElement.style.top = (e.clientY - offsetY) + "px";
+            dragElement.style.right = "auto";
+        }}
+    }});
+
+    document.addEventListener("mouseup", function(){{
+        isDragging = false;
+    }});
+
+}});
+
+</script>
+"""
+
+    mapa.get_root().html.add_child(folium.Element(buscador_html))
+
+# ===============================
+# PANEL ESTADOS + ACTIVIDAD
+# ===============================
+
+    conteo_estados = df_dom["DOMESTADO"].value_counts()
+
+    filas_estados = ""
+    panel_html = ""
+
+    for estado, cantidad in conteo_estados.items():
+
+        nombre = nombres_estados.get(estado, "Desconocido")
+        porcentaje = round((cantidad / total) * 100, 1)
+
+        filas_estados += f"""
+        <tr>
+            <td style='padding:6px; cursor:pointer; color:#0d6efd; font-weight:bold;'
+                onclick="filtrarEstado('{estado}')">
+                {estado}
+            </td>
+            <td style='padding:6px;'>{nombre}</td>
+            <td style='padding:6px; text-align:center; font-weight:bold;'>{cantidad}</td>
+            <td style='padding:6px; text-align:center;'>{porcentaje}%</td>
+        </tr>
+        """
+
+        panel_html = f"""
+    <div style="
+        position: fixed;
+        bottom: 110px;
+        right: 20px;
+        z-index: 9999;
+        display:flex;
+        gap:8px;
+    ">
+
+        <button onclick="toggleEstados()" style="
+            padding:8px 14px;
+            background:#0d6efd;
+            color:white;
+            border:none;
+            border-radius:8px;
+            cursor:pointer;">
+            📊 Estados
+        </button>
+
+        <button onclick="toggleActividad()" style="
+            padding:8px 14px;
+            background:#198754;
+            color:white;
+            border:none;
+            border-radius:8px;
+            cursor:pointer;">
+            📈 Actividad
+        </button>
+
+        <button onclick="toggleMetadata()" style="
+            padding:8px 14px;
+            background:#dc3545;
+            color:white;
+            border:none;
+            border-radius:8px;
+            cursor:pointer;">
+            🧩 Metadata
+        </button>
+
+    </div>
+
+    <!-- PANEL ESTADOS -->
+    <div id="panelEstados" style="
+        display:block;
+        position: fixed;
+        bottom: 160px;
+        right: 20px;
+        background:white;
+        padding:15px;
+        border-radius:10px;
+        box-shadow:0 4px 12px rgba(0,0,0,0.3);
+        max-height:300px;
+        overflow-y:auto;
+        min-width:420px;
+        z-index:9999;">
+        
+        <div style="font-weight:bold; margin-bottom:8px; text-align:center;">
+            📊 Desglose por Estado
+        </div>
+
+        <table style="border-collapse: collapse; font-size:13px; width:100%;">
+            <thead>
+                <tr style="background:#0d6efd; color:white;">
+                    <th style='padding:6px;'>Código</th>
+                    <th style='padding:6px;'>Estado</th>
+                    <th style='padding:6px;'>Cantidad</th>
+                    <th style='padding:6px;'>%</th>
+                </tr>
+            </thead>
+            <tbody>
+                {filas_estados}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- PANEL ACTIVIDAD -->
+    <div id="panelActividad" style="
+        display:none;
+        position: fixed;
+        bottom: 160px;
+        right: 20px;
+        background:white;
+        padding:15px;
+        border-radius:10px;
+        box-shadow:0 4px 12px rgba(0,0,0,0.3);
+        min-width:260px;
+        z-index:9999;">
+        
+        <div style="font-weight:bold; margin-bottom:10px; text-align:center;">
+            📈 Actividad Reciente
+        </div>
+
+        📅 Últimos 7 días:<br>
+        • Eventos: <b>{total_eventos_7_dias}</b><br>
+        • Hogares: <b>{hogares_7_dias}</b>
+
+        <hr style="margin:8px 0;">
+
+        📍 Hoy:<br>
+        • Eventos: <b>{eventos_hoy}</b><br>
+        • Hogares: <b>{hogares_hoy}</b>
+    </div>
+
+    <!-- PANEL METADATA -->
+    <div id="panelMetadata" style="
+        display:none;
+        position: fixed;
+        bottom: 160px;
+        right: 20px;
+        background:white;
+        padding:15px;
+        border-radius:10px;
+        box-shadow:0 4px 12px rgba(0,0,0,0.3);
+        max-height:300px;
+        overflow-y:auto;
+        min-width:420px;
+        z-index:9999;">
+
+        <div style="font-weight:bold; margin-bottom:10px; text-align:center;">
+            🧩 Versiones Desactualizadas ({len(desactualizados)})
+        </div>
+
+        {"<br>".join([
+            f"<b>{d['hogar']}</b><br>Usada: {d['usada']}<br>Oficial: {d['oficial']}<hr>"
+            for d in desactualizados
+        ]) if desactualizados else "<div style='text-align:center;color:green;font-weight:bold;'>✔ Todos actualizados</div>"}
+
+    </div>
+
+   <script>
+
+let estadosActivos = new Set();
+
+function toggleEstados() {{
+    document.getElementById("panelActividad").style.display = "none";
+    document.getElementById("panelMetadata").style.display = "none";
+    const est = document.getElementById("panelEstados");
+    est.style.display = est.style.display === "none" ? "block" : "none";
+}}
+
+function toggleActividad() {{
+    document.getElementById("panelEstados").style.display = "none";
+    document.getElementById("panelMetadata").style.display = "none";
+    const act = document.getElementById("panelActividad");
+    act.style.display = act.style.display === "none" ? "block" : "none";
+}}
+
+function toggleMetadata() {{
+    document.getElementById("panelEstados").style.display = "none";
+    document.getElementById("panelActividad").style.display = "none";
+    const meta = document.getElementById("panelMetadata");
+    meta.style.display = meta.style.display === "none" ? "block" : "none";
+}}
+
+function filtrarEstado(estado) {{
+
+    const filas = document.querySelectorAll("#panelEstados tbody tr");
+
+    // Agregar o quitar del set
+    if (estadosActivos.has(estado)) {{
+        estadosActivos.delete(estado);
+    }} else {{
+        estadosActivos.add(estado);
+    }}
+
+    // Limpiar selección visual
+    filas.forEach(tr => tr.classList.remove("estado-activo"));
+
+    // Volver a marcar los seleccionados
+    filas.forEach(tr => {{
+        const codigo = tr.children[0].innerText.trim();
+        if (estadosActivos.has(codigo)) {{
+            tr.classList.add("estado-activo");
+        }}
+    }});
+
+    aplicarFiltroEstado();
+}}
+
+function aplicarFiltroEstado() {{
+
+    const markers = document.querySelectorAll(".marker-estado");
+
+    markers.forEach(el => {{
+
+        // Si no hay filtros → mostrar todos
+        if (estadosActivos.size === 0) {{
+            el.parentElement.style.display = "block";
+            return;
+        }}
+
+        let visible = false;
+
+        estadosActivos.forEach(estado => {{
+            if (el.classList.contains("marker-estado-" + estado)) {{
+                visible = true;
+            }}
+        }});
+
+        el.parentElement.style.display = visible ? "block" : "none";
+    }});
+}}
+
+</script>
+"""
+    mapa.get_root().html.add_child(folium.Element(panel_html))
+
+    # ===============================
+    # REFERENCIAS INFERIORES
+    # ===============================
+
+    referencias_html = f"""
+    <div style="
+        display: {'flex' if mostrar_buscador else 'none'};
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        background: #0d6efd;
+        color: white;
+        border-top: 2px solid #084298;
+        padding: 14px 25px;
+        font-size: 13px;
+        z-index: 9999;
+        box-shadow: 0 -2px 6px rgba(0,0,0,0.2);
+    ">
+        <div style="text-align:center;font-weight:bold;font-size:14px;margin-bottom:6px;">
+            REFERENCIAS
+        </div>
+
+        <div style="display:flex;justify-content:center;gap:30px;flex-wrap:wrap;">
+            <div>🏠 <b>Presencial</b> — Encuesta en territorio</div>
+            <div>☎️ <b>Telefónica</b> — Encuesta por teléfono</div>
+            <div>🔥 <b>Mapa de calor</b> — Concentración de actividad</div>
+            <div>🔴 <b>Resaltado</b> — Hogar buscado</div>
+        </div>
+    </div>
+    """
+
+    mapa.get_root().html.add_child(folium.Element(referencias_html))
+
+    mapa.get_root().html.add_child(folium.Element("""
+    <style>
+    .leaflet-container {
+        margin-bottom: 90px;
+    }
+    </style>
+    """))
+
+
+    loading_html = """
+    <div id="loadingPanel" style="
+        position:fixed;
+        top:0;
+        left:0;
+        width:100%;
+        height:100%;
+        background:white;
+        z-index:99999;
+        display:flex;
+        justify-content:center;
+        align-items:center;
+        flex-direction:column;
+    ">
+
+    <h3 style="color:#0d6efd; margin-bottom:20px;">
+    Cargando mapa territorial...
+    </h3>
+
+    <div style="
+        width:320px;
+        height:22px;
+        border:1px solid #ccc;
+        border-radius:6px;
+        overflow:hidden;
+    ">
+
+    <div id="progressBar" style="
+        width:0%;
+        height:100%;
+        background:#0d6efd;
+    "></div>
+
+    </div>
+
+    <div id="progressText" style="margin-top:10px;font-weight:bold;">
+    0 %
+    </div>
+
+    </div>
+
+    <script>
+
+    let progreso = 0;
+
+    let intervalo = setInterval(function(){
+
+        progreso += Math.random()*10;
+
+        if(progreso >= 100){
+            progreso = 100;
+            clearInterval(intervalo);
+        }
+
+        document.getElementById("progressBar").style.width = progreso + "%";
+        document.getElementById("progressText").innerHTML = Math.floor(progreso) + " %";
+
+    },300);
+
+    document.addEventListener("DOMContentLoaded", function(){
+
+        let map = document.querySelector(".leaflet-container");
+
+        if(map){
+
+            setTimeout(function(){
+
+                document.getElementById("progressBar").style.width="100%";
+                document.getElementById("progressText").innerHTML="100 %";
+
+                document.getElementById("loadingPanel").style.display="none";
+
+            },600);
+
+        }
+
+    });
+
+
+    </script>
+    """
+ 
+
+        # ===============================
+    # MOSTRAR MENSAJES EN EL MAPA
+    # ===============================
+    # ===============================
+# MOSTRAR MENSAJES EN EL MAPA
+# ===============================
+    if mensaje_error:
+
+        mapa.get_root().html.add_child(
+            folium.Element(f"""
+            <div style="
+                position: fixed;
+                top: 80px;
+                left: 50%;
+                transform: translateX(-50%);
+                background:#ffe6e6;
+                padding:12px 22px;
+                border:1px solid red;
+                border-radius:8px;
+                z-index:9999;
+                font-size:14px;
+                font-weight:bold;
+                box-shadow:0 4px 10px rgba(0,0,0,0.25);
+                text-align:center;
+            ">
+                {mensaje_error}
+            </div>
+            """)
+        )
+
+    mapa.get_root().html.add_child(folium.Element(loading_html))
+
+    html = mapa.get_root().render()
+
+    html += """
+    <script>
+    var SID_ACTUAL = "__SID__";
+
+    function cerrarSesion() {
+        fetch("/cerrar_panel?sid=" + SID_ACTUAL, {
+            method: "GET",
+            keepalive: true
+        });
+    }
+
+    window.addEventListener("beforeunload", cerrarSesion);
+    window.addEventListener("pagehide", cerrarSesion);
+    </script>
+    """
+
+    html = html.replace("__SID__", sid)
+
+    return HTMLResponse(content=html)
