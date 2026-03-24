@@ -1,0 +1,12 @@
+# Entorno virtual
+.venv/
+
+# Variables sensibles
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Otros
+*.log
