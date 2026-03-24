@@ -1,24 +1,72 @@
 # ===============================
 # IMPORTS PRINCIPALES
 # ===============================
+# Librerías para seguridad, API, base de datos, mapas y utilidades
 
-from cryptography.fernet import Fernet
-import json
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse
-import cx_Oracle
-import pandas as pd
-import folium
+from cryptography.fernet import Fernet   # 🔐 Encriptación de tokens
+import json                              # 📦 Manejo de JSON
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+import cx_Oracle                         # 🗄️ Conexión Oracle
+import pandas as pd                      # 📊 Procesamiento de datos
+import folium                            # 🗺️ Mapas
 import math
 from folium.plugins import HeatMap, MarkerCluster
 import os
 from dotenv import load_dotenv
-from fastapi import Request
+import base64
+import uuid
 
-sesiones = {}
-usuarios_activos = {}
-sids_usados = set()
-MAX_SESIONES = 3
+
+# ===============================
+# CARGAR CALLES
+# ===============================
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+ruta_geo = os.path.join(
+    BASE_DIR,
+    "zonas_ejes_para_webmap_smr",
+    "eje_ide_2025_precision5.geojson"
+)
+
+with open(ruta_geo, "r", encoding="utf-8") as f:
+    geo_calles = json.load(f)
+
+
+
+# ===============================
+# CARGAR ZONAS
+# ===============================
+
+ruta_zonas = os.path.join(
+    BASE_DIR,
+    "zonas_ejes_para_webmap_smr",
+    "zonas_11.geojson"
+)
+
+with open(ruta_zonas, "r", encoding="utf-8") as f:
+    geo_zonas = json.load(f)
+
+print("✅ Zonas cargadas:", len(geo_zonas["features"]))
+
+# ===============================
+# 🔥 PREPARAR GEOJSON (OBLIGATORIO)
+# ===============================
+geo_zonas_str = json.dumps(geo_zonas)
+geo_calles_str = json.dumps(geo_calles)
+
+
+# ===============================
+# CONTROL DE SESIONES (CRÍTICO)
+# ===============================
+
+sesiones = {}             # 🔐 SID → token
+usuarios_activos = {}     # 👤 IP → lista de SID activos
+sids_usados = set()       # 🚫 SIDs abiertos (evita duplicar pestañas)
+
+MAX_SESIONES = 3          # 🔒 Máximo paneles abiertos por usuario
 
 # ===============================
 # CARGAR VARIABLES
@@ -35,9 +83,20 @@ fernet = Fernet(SECRET_KEY)
 
 app = FastAPI()
 
+#from fastapi.middleware.gzip import GZipMiddleware 
+
+#app.add_middleware(GZipMiddleware, minimum_size=1000)
+
 # ===============================
+# FUNCION NORMALIZAR CODCOMP 🔥
+# ===============================
+
+def normalizar_cod(c):
+    return str(c).strip().replace(" ", "").lstrip("0")
+
+# =======================================================
 # CONFIGURACIÓN BASE DE DATOS
-# ===============================
+# =======================================================
 
 ORACLE_USER = os.getenv("ORACLE_USER1")
 ORACLE_PASS = os.getenv("ORACLE_PASS1")
@@ -52,6 +111,9 @@ try:
     conn.close()
 except Exception as e:
     print("❌ Error conexión Oracle:", e)
+
+
+
 
 # ===============================
 # FUNCIONES TOKEN
@@ -114,6 +176,14 @@ def login_panel(request: Request, token: str):
         s for s in usuarios_activos[clave] if s in sesiones
     ]
 
+     
+    # 🔥 LIMPIAR SESIONES ROTAS (CLAVE)
+    usuarios_activos[clave] = [
+        s for s in usuarios_activos[clave]
+        if s in sesiones and s not in sids_usados
+    ]
+
+     
     # 🔒 límite máximo
     if len(usuarios_activos[clave]) >= 3:
 
@@ -138,9 +208,35 @@ def login_panel(request: Request, token: str):
 
     return RedirectResponse(url=f"/panel?sid={sid}", status_code=302)
 
-# ===============================
-# ENDPOINT PRINCIPAL PANEL
-# ===============================
+
+#@app.get("/cerrar_panel")
+@app.api_route("/cerrar_panel", methods=["GET", "POST"])
+
+
+                
+def cerrar_panel(sid: str):
+
+                    if sid in sesiones:
+
+                        token = sesiones.pop(sid)
+
+                        datos = desencriptar_token(token)
+
+                        if datos:
+                            usuario = datos.get("usuario")
+
+                            for clave in usuarios_activos:
+                                if sid in usuarios_activos[clave]:
+                                    usuarios_activos[clave].remove(sid)
+
+                    # 🔥 AGREGAR ESTO (CLAVE)
+                    # 🔥 limpiar si quedó colgado
+                    
+                    if sid in sids_usados:
+                        print("⚠ SID colgado en panel, lo libero:", sid)
+                        sids_usados.discard(sid)
+
+                    sids_usados.add(sid)
 
 # ===============================
 # ENDPOINT PRINCIPAL PANEL
@@ -178,6 +274,13 @@ def panel(request: Request, sid: str = Query(...)):
 
     usuario = datos.get("usuario")
     usuario = usuario.strip().upper() if usuario else None
+    clave = usuario   # 🔥 CONTROL POR USUARIO REAL
+
+    # ===============================
+    # 🔥 CONEXIÓN ORACLE (MOVER ACÁ)
+    # ===============================
+    conn = cx_Oracle.connect(ORACLE_USER, ORACLE_PASS, ORACLE_DSN)
+
 
     # 👉 YA NO USAMOS usuario+ip
     ip = request.client.host
@@ -192,38 +295,12 @@ def panel(request: Request, sid: str = Query(...)):
     print("Correlativo:", correlativo)
 
 
-    @app.get("/cerrar_panel")
-    def cerrar_panel(sid: str):
-
-        if sid in sesiones:
-
-            token = sesiones.pop(sid)
-
-            datos = desencriptar_token(token)
-
-            if datos:
-                usuario = datos.get("usuario")
-
-                for clave in usuarios_activos:
-                    if sid in usuarios_activos[clave]:
-                        usuarios_activos[clave].remove(sid)
-
-        # 🔥 AGREGAR ESTO (CLAVE)
-        if sid in sids_usados:
-            sids_usados.remove(sid)
-
-        print("Sesiones activas:", usuarios_activos)
-        print("SIDs usados:", sids_usados)
-
-        return {"ok": True}
-
     # ===============================
     # MENSAJES HTML
     # ===============================
 
-    mensaje_error = ""
+    mensaje_error = "" 
 
-    conn = cx_Oracle.connect(ORACLE_USER, ORACLE_PASS, ORACLE_DSN)
     cursor = conn.cursor()
 
     cursor.arraysize = 500
@@ -262,7 +339,39 @@ def panel(request: Request, sid: str = Query(...)):
 
     print("Schema detectado:", schema)
 
-         # ===============================
+
+# ===============================
+# TRAER CONGLOMERADOS DEL ENCUESTADOR
+# ===============================
+
+    usuario = usuario.strip().upper()
+
+    query_cong = f"""
+        SELECT 
+            TO_CHAR(TO_NUMBER(DOMDEPARTAMENTO)) ||
+            LPAD(TRIM(DOMSECCION),2,'0') ||
+            LPAD(TRIM(DOMSEGMENTO),3,'0') ||
+            LPAD(TRIM(DOMZONA),3,'0') AS CODCOMP
+        FROM {schema}.DOMICILIOS
+        WHERE TRIM(UPPER(DOMUSRENCUESTADOR)) = :usuario
+        AND TRIM(CFGENCUESTA) = :cfg   -- 🔥 ESTE FALTABA
+    """
+    df_cong = pd.read_sql(
+        query_cong,
+        conn,
+        params={
+            "usuario": usuario,
+            "cfg": encuesta   # 🔥 importante si agregaste CFGENCUESTA
+        }
+    )
+
+    print("Usuario limpio:", usuario)
+    print("Filas query_cong:", len(df_cong))
+    print(df_cong.head())
+  
+    
+
+    # ===============================
     # VALIDAR ENCUESTA
     # ===============================
 
@@ -293,8 +402,6 @@ def panel(request: Request, sid: str = Query(...)):
             ⚠ Encuesta <b>{encuesta}</b> no existe
         </div>
         """
-   
-
 
      
     # ===============================
@@ -310,9 +417,7 @@ def panel(request: Request, sid: str = Query(...)):
     row_nombre = cursor.fetchone()
     nombre = row_nombre[0] if row_nombre else usuario
 
-    # ===============================
-    # CONSULTA DOMICILIOS DEL USUARIO
-    # ===============================
+
 
           # ===============================
     # CONSULTA DOMICILIOS DEL USUARIO
@@ -324,8 +429,12 @@ def panel(request: Request, sid: str = Query(...)):
         d.DOMUBICACION,
         d.DOMNOMCALLE,
         d.DOMNROPUERTA,
-        d.DOMMODALIDAD,
-        d.DOMESTADO
+        d.DOMDEPARTAMENTO,
+        d.DOMLOCALIDAD,
+        d.DOMMODALIDAD,      
+        d.DOMESTADO,
+        d.DOMCONGLOMERADO
+        
     FROM {schema}.DOMICILIOS d
     WHERE TRIM(d.CFGENCUESTA) = :cfg
     AND TRIM(UPPER(d.DOMUSRENCUESTADOR)) = :usuario
@@ -375,9 +484,159 @@ def panel(request: Request, sid: str = Query(...)):
 
     df_dom = pd.DataFrame(rows, columns=[col[0] for col in cursor.description])
 
-    # limpiar espacios de campos CHAR de Oracle
-    df_dom = df_dom.map(lambda x: x.strip() if isinstance(x, str) else x)
+
+
+
+    # ===============================
+    # CODCOMP DESDE DOMICILIOS
+    # ===============================
+    
+
+    df_dom["codcomp"] = (
+        df_dom["DOMCORRELATIVO"]
+        .fillna("")              # 🔥 CLAVE
+        .astype(str)
+        .str.strip()
+        .str[:10]
+        .apply(normalizar_cod)
+    )
+    
+    codigos_validos = set(
+    df_cong["CODCOMP"].apply(normalizar_cod)
+        )
+
+    print("Zonas únicas:", len(codigos_validos))
+    print("CODIGOS ENCUESTADOR:", list(codigos_validos)[:10])
+
+
+        # ===============================
+        # ZONAS POR MODALIDAD
+        # ===============================
+
+    df_presencial = df_dom[df_dom["DOMMODALIDAD"] == "P"]
+    df_telefonico = df_dom[df_dom["DOMMODALIDAD"] == "T"]
+
+    zonas_presencial = set(df_presencial["codcomp"].apply(normalizar_cod))
+    zonas_telefonico = set(df_telefonico["codcomp"].apply(normalizar_cod))
+
+
+
+    # ===============================
+# FILTRAR GEOJSON (SEGURO)
+# ===============================
+
+    geo_zonas_filtrado = {
+        "type": "FeatureCollection",
+        "features": []
+    }
+
+    for f in geo_zonas.get("features", []):
+
+        props = f.get("properties") or {}
+
+        cod = props.get("codcomp") or props.get("CODCOMP") or ""
+        #cod = str(cod).strip().replace(" ", "")
+        cod = normalizar_cod(cod)
+
+        # 🔥 validar codcomp
+        if not cod:
+            continue
+
+        if cod not in codigos_validos:
+            continue
+
+        geom = f.get("geometry")
+        if not geom:
+            continue
+
+        geo_zonas_filtrado["features"].append({
+            "type": "Feature",
+            "properties": {
+                "codcomp": cod   # 🔥 SIEMPRE presente
+            },
+            "geometry": geom
+        })
+
+    print("TOTAL ZONAS FILTRADAS:", len(geo_zonas_filtrado["features"]))
+    geo_zonas_str = json.dumps(geo_zonas_filtrado)
+
+
+    # ===============================
+    # ZONAS CARGA (LIMPIO)
+    # ===============================
+
+    #zonas_carga = (
+     #   df_cong["CODCOMP"]
+      #  .astype(str)
+       # .str.strip()
+        #.str.replace(" ", "")
+        #.value_counts()
+        #.to_dict()
+    #)
+
+    zonas_carga = (
+        df_cong["CODCOMP"]
+        .apply(normalizar_cod)
+        .value_counts()
+        .to_dict()
+    )
+
+
+    # ===============================
+    # DEBUG
+    # ===============================
+
+    print("EJEMPLO MATCH:")
+    for f in geo_zonas_filtrado["features"][:5]:
+        cod = normalizar_cod(f.get("properties", {}).get("codcomp", ""))
+        print("geo:", cod, "carga:", zonas_carga.get(cod, 0))
+
+    print("ZONAS_CARGA:", list(zonas_carga.items())[:10])
+
+
+        # ===============================
+    # 🔴 CODCOMP EN DOMICILIOS PERO NO EN GEOJSON
+    # ===============================
+
+    codcomp_geojson = set(
+        normalizar_cod(f.get("properties", {}).get("codcomp", ""))
+        for f in geo_zonas["features"]
+    )
+
+    codcomp_domicilios = set(zonas_carga.keys())
+
+    codcomp_sin_geo = codcomp_domicilios - codcomp_geojson
+
+    print("🔴 CODCOMP SIN GEOJSON:", list(codcomp_sin_geo)[:20])
+    print("TOTAL SIN GEOJSON:", len(codcomp_sin_geo))
+
+
+    # ===============================
+    # COLOR ZONAS (FUERA DEL FOR 🔥)
+    # ===============================
+
+    #def color_zona(carga):
+     #   if carga == 0:
+      #      return "#cccccc"
+       # elif carga < 10:
+        #    return "green"
+        #elif carga < 30:
+         #   return "orange"
+        #else:
+         #   return "red"
+     
+    def color_zona(carga):
+            if carga > 0:
+                return "green"   # 🔥 TODAS verdes
+            else:
+                return "#cccccc"  # sin datos en gris
+
+    # ===============================
+    # CORRELATIVOS
+    # ===============================
+
     correlativos = df_dom["DOMCORRELATIVO"].unique().tolist()
+
 
     # ===============================
     # FILTRO POR CORRELATIVO
@@ -388,17 +647,14 @@ def panel(request: Request, sid: str = Query(...)):
         correlativo = correlativo.strip()
         df_dom = df_dom[df_dom["DOMCORRELATIVO"] == correlativo]
 
+
     # ===============================
     # FILTRO POR MODALIDAD
     # ===============================
 
     if modalidad in ("P", "T"):
         df_dom = df_dom[df_dom["DOMMODALIDAD"] == modalidad]
-
-    # ===============================
-    # LOG
-    # ===============================
-
+   
     # ===============================
     # LOG
     # ===============================
@@ -481,12 +737,24 @@ def panel(request: Request, sid: str = Query(...)):
 
                     df_log["DOMCORRELATIVO"] = df_log["DOMCORRELATIVO"].astype(str).str.strip()
 
+                    #coords_log_por_caso = (
+                     #   df_log
+                      #  .groupby("DOMCORRELATIVO")[["LAT_LOG","LON_LOG"]]
+                       # .apply(lambda x: x.values.tolist())
+                        #.to_dict()
+                    #)
+
                     coords_log_por_caso = (
                         df_log
-                        .groupby("DOMCORRELATIVO")[["LAT_LOG","LON_LOG"]]
-                        .apply(lambda x: x.values.tolist())
+                        .groupby("DOMCORRELATIVO")
+                        .apply(lambda g: g.apply(lambda r: {
+                            "lat": r["LAT_LOG"],
+                            "lon": r["LON_LOG"],
+                            "tipo": r["LOGTIPO"]
+                        }, axis=1).tolist())
                         .to_dict()
                     )
+
 
             # COORDENADAS POR CASO
             # ===============================
@@ -569,8 +837,8 @@ def panel(request: Request, sid: str = Query(...)):
     """
 
      # ===============================
-# LIMPIEZA DOMICILIOS SEGURA
-# ===============================
+    # LIMPIEZA DOMICILIOS SEGURA
+    # ===============================
 
     if df_dom.empty:
         mensaje_error = "⚠ No hay domicilios para este usuario"
@@ -592,9 +860,33 @@ def panel(request: Request, sid: str = Query(...)):
                 df_dom["LON"] = pd.to_numeric(coords[1].str.strip(), errors="coerce")
 
                 df_dom = df_dom.dropna(subset=["LAT","LON"])
+                codigos_con_puntos = set(df_dom["codcomp"])
+
+
+                print("ZONAS CON COORDENADAS:", len(codigos_con_puntos))
 
             else:
                 mensaje_error = "⚠ Error en formato de coordenadas"
+
+        # ===============================
+    # 🔥 ZONAS SOLO CON COORDENADAS
+    # ===============================
+
+    df_dom["codcomp"] = (
+    df_dom["DOMCONGLOMERADO"]
+    .fillna("")              # 🔥 CLAVE
+    .astype(str)
+    .str.split("-")
+    .str[0]
+    .str.strip()
+    .str.replace(" ", "")
+)
+
+    codigos_con_puntos = set(df_dom["codcomp"])
+
+    print("ZONAS CON COORDENADAS:", len(codigos_con_puntos))
+
+
 
        # ===============================
     # MAPA VACÍO SI NO HAY DATOS
@@ -608,9 +900,9 @@ def panel(request: Request, sid: str = Query(...)):
         )
 
 
-# ===============================
-# LIMPIEZA LOG SEGURA
-# ===============================
+    # ===============================
+    # LIMPIEZA LOG SEGURA
+    # ===============================
 
     heat_data = []
 
@@ -635,24 +927,24 @@ def panel(request: Request, sid: str = Query(...)):
             print("⚠ LOGUBICACION con formato inválido")
 
         # ===============================
-        # 🔥 NORMALIZAR CORRELATIVOS
+        # NORMALIZAR CORRELATIVOS
         # ===============================
 
         df_dom["DOMCORRELATIVO"] = df_dom["DOMCORRELATIVO"].astype(str).str.strip()
         df_log["DOMCORRELATIVO"] = df_log["DOMCORRELATIVO"].astype(str).str.strip()
 
-    # ===============================
-    # 🔥 AGRUPAR LOG POR HOGAR
-    # ===============================
+        # ===============================
+        #  AGRUPAR LOG POR HOGAR
+        # ===============================
 
-    log_por_hogar = {
-        k: v.sort_values("LOGFECHAHORA")
-        for k, v in df_log.groupby("DOMCORRELATIVO")
-    }
+        log_por_hogar = {
+            k: v.sort_values("LOGFECHAHORA")
+            for k, v in df_log.groupby("DOMCORRELATIVO") 
+        }
      
-      # ===============================
-    # ÚLTIMA VERSION ENVIADA POR HOGAR
-    # ===============================
+        # ===============================
+        # ÚLTIMA VERSION ENVIADA POR HOGAR
+        # ===============================
 
     df_env = df_log[df_log["LOGTIPO"] == "ENV"].copy()
 
@@ -666,18 +958,18 @@ def panel(request: Request, sid: str = Query(...)):
         .last()
     )
 
-    # ===============================
-# 🔥 AGRUPAR LOG POR HOGAR
-# ===============================
+        # ===============================
+        #  AGRUPAR LOG POR HOGAR
+        # ===============================
 
     log_por_hogar = {
         k: v.sort_values("LOGFECHAHORA")
         for k, v in df_log.groupby("DOMCORRELATIVO")
     }
 
-# ===============================
-# 🔥 DETECTAR VERSIONES USADAS EN LOG
-# ===============================
+        # ===============================
+        #  DETECTAR VERSIONES USADAS EN LOG
+        # ===============================
 
     df_env = df_log[df_log["LOGTIPO"] == "ENV"].copy()
 
@@ -719,9 +1011,9 @@ def panel(request: Request, sid: str = Query(...)):
     hogares_hoy = actividad_hoy["DOMCORRELATIVO"].nunique()
     eventos_hoy = len(actividad_hoy)
 
-        # ===============================
-        # CONTADORES
-        # ===============================
+    # ===============================
+    # CONTADORES
+    # ===============================
 
     cant_presenciales = len(df_dom[df_dom["DOMMODALIDAD"] == "P"])
     cant_telefonicos = len(df_dom[df_dom["DOMMODALIDAD"] == "T"])
@@ -800,15 +1092,11 @@ def panel(request: Request, sid: str = Query(...)):
 
 
     # ===============================
-    # CENTRO DEL MAPA
-    # ===============================
-
-    # ===============================
     # CENTRO DEL MAPA SEGURO
     # ===============================
 
-    if df_dom.empty or "LAT" not in df_dom.columns:
-        centro = [-34.9011, -56.1645]  # Montevideo por defecto
+    if df_dom.empty or "LAT" not in df_dom.columns or df_dom["LAT"].isna().all():
+        centro = [-34.9011, -56.1645]
     else:
         centro = [df_dom["LAT"].mean(), df_dom["LON"].mean()]
 
@@ -819,11 +1107,46 @@ def panel(request: Request, sid: str = Query(...)):
     mapa = folium.Map(
         location=centro,
         zoom_start=10,
-        tiles="OpenStreetMap",   # 👈 Abre con calles visibles
+        tiles="OpenStreetMap",   #  Abre con calles visibles
         control_scale=True
     )
+     
+    # ===============================
+    # CONTROLES TIPO GIS
+    # ===============================
+    from folium.plugins import Fullscreen, MeasureControl, Draw, MousePosition
 
-    # 🔥 AQUI VA
+    # 🔲 Pantalla completa
+    Fullscreen(position="topleft").add_to(mapa)
+
+    # 📏 Medir distancia
+    MeasureControl(
+        position="topleft",
+        primary_length_unit="kilometers"
+    ).add_to(mapa)
+
+    # ✏️ Dibujar zonas
+    Draw(position="topleft").add_to(mapa)
+
+    # 📍 Coordenadas del mouse (abajo)
+    MousePosition(position="bottomleft").add_to(mapa)
+
+    # ===============================
+    # 🧭 BRÚJULA
+    # ===============================
+    from folium.plugins import FloatImage
+    from folium.plugins import Geocoder
+
+    Geocoder(
+        position="topleft",
+        collapsed=True,
+        add_marker=True,
+        placeholder="Buscar dirección...",
+    ).add_to(mapa)
+
+        
+
+    
     from folium.plugins import MiniMap
 
     MiniMap(
@@ -842,6 +1165,7 @@ def panel(request: Request, sid: str = Query(...)):
         "CartoDB positron",
         name="🏙️ Mapa Claro",
         overlay=False,
+        show=False,
         control=True
     ).add_to(mapa)
 
@@ -850,6 +1174,7 @@ def panel(request: Request, sid: str = Query(...)):
         "CartoDB dark_matter",
         name="🌙 Modo Oscuro",
         overlay=False,
+        show=False,
         control=True
     ).add_to(mapa)
 
@@ -859,19 +1184,238 @@ def panel(request: Request, sid: str = Query(...)):
         attr="Esri World Imagery",
         name="🛰️ Satélite",
         overlay=False,
-        control=True
+        control=True,
+        show=False
+         
     ).add_to(mapa)
 
-    # 🛰️🌍 Etiquetas (para usar encima del satélite)
+
     folium.TileLayer(
         tiles="https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
         attr="Esri Labels",
         name="🛰️🌍 Etiquetas",
-        overlay=True,
-        control=True
+        overlay=True,   # 🔥 CAMBIAR ESTO
+        control=True,
+        show=False      # 🔥 OPCIONAL: no cargar por defecto
     ).add_to(mapa)
 
+      # ===============================
+    # 🛣️ CAPA CALLES
+    # ===============================
+    fg_calles = folium.FeatureGroup(
+        name="🛣️ Ejes",
+        show=False
+    )
+     
 
+     
+    folium.GeoJson(
+        geo_calles,
+        style_function=lambda f: {
+            "color": "blue",
+            "weight": 1,
+            "opacity": 0.5
+        }
+    ).add_to(fg_calles)
+
+    fg_calles.add_to(mapa)
+
+    # ===============================
+    # 🗺️ TODAS LAS ZONAS (ROJO = SIN DATOS)
+    # ===============================
+
+    #fg_zonas_total = folium.FeatureGroup(
+     #   name="🗺️ Todas las zonas",
+      #  show=False
+    #)
+
+    def estilo_zonas_total(f):
+        cod = str(f.get("properties", {}).get("codcomp", "")).strip().replace(" ", "")
+
+        # 🔴 zona SIN domicilios
+        if cod not in codcomp_domicilios:
+            return {
+                "fillColor": "red",
+                "color": "red",
+                "weight": 2,
+                "fillOpacity": 0.6,
+            }
+
+        # 🟣 zona normal
+        return {
+            "fillColor": "#6D0F75",
+            "color": "#2E003E",
+            "weight": 1,
+            "fillOpacity": 0.2,
+        }
+
+    #folium.GeoJson(
+     #   geo_zonas,
+      #  style_function=estilo_zonas_total
+    #).add_to(fg_zonas_total)
+
+
+    #fg_zonas_total.add_to(mapa)
+    folium.GeoJson(geo_zonas_filtrado)
+
+    # ===============================
+# 🟢 ZONAS DEL ENCUESTADOR (FIX FINAL)
+# ===============================
+
+    print("TOTAL GEO ORIGINAL:", len(geo_zonas["features"]))
+    print("TOTAL GEO FILTRADO:", len(geo_zonas_filtrado["features"]))
+
+    # 🔥 LIMPIAR FEATURES INVALIDAS
+    features_limpias = [
+        f for f in geo_zonas_filtrado["features"]
+        if f.get("properties") 
+        and f["properties"].get("codcomp")
+    ]
+
+    print("TOTAL ZONAS LIMPIAS:", len(features_limpias))
+
+    geo_final = {
+        "type": "FeatureCollection",
+        "features": features_limpias
+    }
+
+    # ===============================
+    # 🔥 CAPAS POR MODALIDAD
+    # ===============================
+
+    fg_zonas_presencial = folium.FeatureGroup(
+        name="🟢 Zonas Presencial",
+        show=False
+    )
+
+    fg_zonas_telefonico = folium.FeatureGroup(
+        name="🔵 Zonas Telefónica",
+        show=False
+    )
+
+    # 🔥 SOLO SI HAY DATOS
+    if geo_final["features"]:
+
+        # 🟢 PRESENCIAL
+        folium.GeoJson(
+            geo_final,
+            style_function=lambda f: {
+                "fillColor": "green" if normalizar_cod(f["properties"]["codcomp"]) in zonas_presencial else "#cccccc",
+                "color": "black",
+                "weight": 1,
+                "fillOpacity": 0.6,
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["codcomp"],
+                aliases=["Zona Geojson:"]
+            )
+        ).add_to(fg_zonas_presencial)
+
+        # 🔵 TELEFÓNICO
+        folium.GeoJson(
+            geo_final,
+            style_function=lambda f: {
+                "fillColor": "blue" if normalizar_cod(f["properties"]["codcomp"]) in zonas_telefonico else "#cccccc",
+                "color": "black",
+                "weight": 1,
+                "fillOpacity": 0.6,
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["codcomp"],
+                aliases=["Zona Geojson:"]
+            )
+        ).add_to(fg_zonas_telefonico)
+
+    else:
+        print("⚠️ No hay zonas válidas para mostrar")
+
+    # 🔥 AGREGAR AL MAPA
+    fg_zonas_presencial.add_to(mapa)
+    fg_zonas_telefonico.add_to(mapa)
+
+
+    # ===============================
+    # 🔥 CONTROL DE CAPAS (JS)
+    # ===============================
+    mapa.get_root().html.add_child(folium.Element("""
+    <script>
+
+    function controlarCapasCriticas() {
+
+        let labels = document.querySelectorAll('.leaflet-control-layers-overlays label');
+
+        labels.forEach(label => {
+            let input = label.querySelector('input');
+
+            if (!input) return;
+
+            input.onchange = function() {
+
+                let capas = [];
+
+                document.querySelectorAll('.leaflet-control-layers-overlays label').forEach(l => {
+                    let txt = l.innerText.trim();
+                    let inp = l.querySelector('input');
+
+                    capas.push({nombre: txt, input: inp});
+                });
+
+                let todasZonas = capas.find(c => c.nombre.includes("Todas las zonas"));
+                let ejes = capas.find(c => c.nombre.includes("Ejes"));
+
+                let texto = label.innerText.trim();
+
+                // 🔥 ACTIVAR TODAS LAS ZONAS
+                if (texto.includes("Todas las zonas") && this.checked) {
+
+                    if (ejes && ejes.input.checked) {
+                        ejes.input.click();
+                    }
+
+                    if (ejes) {
+                        ejes.input.disabled = true;
+                    }
+                }
+
+                // 🔥 DESACTIVAR TODAS LAS ZONAS
+                if (texto.includes("Todas las zonas") && !this.checked) {
+
+                    if (ejes) {
+                        ejes.input.disabled = false;
+                    }
+                }
+
+                // 🔥 ACTIVAR EJES
+                if (texto.includes("Ejes") && this.checked) {
+
+                    if (todasZonas && todasZonas.input.checked) {
+                        todasZonas.input.click();
+                    }
+
+                    if (todasZonas) {
+                        todasZonas.input.disabled = true;
+                    }
+                }
+
+                // 🔥 DESACTIVAR EJES
+                if (texto.includes("Ejes") && !this.checked) {
+
+                    if (todasZonas) {
+                        todasZonas.input.disabled = false;
+                    }
+                }
+
+            };
+        });
+    }
+
+    // esperar carga leaflet
+    setTimeout(function(){
+        controlarCapasCriticas();
+    }, 1500);
+
+    </script>
+    """))
         # ===============================
     # HEATMAP SOLO DEL CASO BUSCADO
     # ===============================
@@ -966,7 +1510,7 @@ def panel(request: Request, sid: str = Query(...)):
                 folium.CircleMarker(
                     location=[lat, lon],
                     radius=4,
-                    color="yellow",
+                    color="yellow", 
                     fill=True,
                     fill_color="yellow",
                     fill_opacity=0.9
@@ -994,19 +1538,19 @@ def panel(request: Request, sid: str = Query(...)):
     )
 
 
-  
     cluster_presencial = MarkerCluster(
-        disableClusteringAtZoom=12,
+        disableClusteringAtZoom=None,
         spiderfyOnMaxZoom=True,
-        showCoverageOnHover=False
+        showCoverageOnHover=False,
+        maxClusterRadius=60
     ).add_to(fg_presencial)
 
     cluster_telefonico = MarkerCluster(
-        disableClusteringAtZoom=12,
+        disableClusteringAtZoom=None,
         spiderfyOnMaxZoom=True,
-        showCoverageOnHover=False
+        showCoverageOnHover=False,
+        maxClusterRadius=60
     ).add_to(fg_telefonico)
-
     
         # ===============================
         # MARCADORES   
@@ -1015,6 +1559,7 @@ def panel(request: Request, sid: str = Query(...)):
     import math
     coords_por_hogar = {}
     desactualizados = []
+    coords_por_hogar_real = {}
 
     for i, (_, row) in enumerate(df_dom.iterrows()):
 
@@ -1093,11 +1638,13 @@ def panel(request: Request, sid: str = Query(...)):
             emoji = "☎️"
             destino = cluster_telefonico
 
-        angle = (i * 30) % 360
-        radius = 0.00022
+        #angle = (i * 30) % 360
+        #radius = 0.00022
 
-        lat = row["LAT"] + radius * math.cos(math.radians(angle))
-        lon = row["LON"] + radius * math.sin(math.radians(angle))
+        #lat = row["LAT"] + radius * math.cos(math.radians(angle))
+        #lon = row["LON"] + radius * math.sin(math.radians(angle))
+        lat = row["LAT"]
+        lon = row["LON"]
 
         coords_por_hogar[hogar] = {"lat": lat, "lon": lon}
 
@@ -1105,6 +1652,8 @@ def panel(request: Request, sid: str = Query(...)):
         <div style="font-size:13px; width:340px">
             <b>🏠 Domicilio:</b> {hogar}<br>
             <b>📍 Dirección:</b> {row['DOMNOMCALLE']} {row['DOMNROPUERTA']}<br>
+            <b>🗺️ Departamento:</b> {row['DOMDEPARTAMENTO']}<br>
+            <b>🏙️ Localidad:</b> {row['DOMLOCALIDAD']}<br> 
             <b>📌 Modalidad:</b> {modalidad}<br>
             <b>📊 Estado:</b> {estado}<br>
             <b>🧩 Metadata:</b> {version_usada if version_usada else 'Sin registro'}<br>
@@ -1143,7 +1692,7 @@ def panel(request: Request, sid: str = Query(...)):
 
     folium.LayerControl(
         position="topright",
-        collapsed=False
+        collapsed=True
     ).add_to(mapa)
     
     # ===============================
@@ -1213,16 +1762,10 @@ def panel(request: Request, sid: str = Query(...)):
     </style>
 """))
 
-# ===============================
-# ===============================
+
+    # ===============================
 # BUSCADOR MOVIBLE
 # ===============================
-
-  # ===============================
-# BUSCADOR MOVIBLE
-# ===============================
-
-    import json
 
     coords_json = json.dumps(coords_por_hogar)
     logs_json = json.dumps(coords_log_por_caso)
@@ -1230,140 +1773,150 @@ def panel(request: Request, sid: str = Query(...)):
     map_name = mapa.get_name()
 
     buscador_html = f"""
-<div id="buscadorMovible" style="
-    display: {'flex' if mostrar_buscador else 'none'};
-    position: fixed;
-    bottom: 500px;
-    right: 20px;
-    z-index:9999;
-    align-items:center;
-    gap:10px;
-">
-
-    <div style="
-        display:flex;
+    <div id="buscadorMovible" style="
+        display: {'flex' if mostrar_buscador else 'none'};
+        position: fixed;
+        bottom: 500px;
+        right: 20px;
+        z-index:9999;
         align-items:center;
-        gap:6px;
-        background:white;
-        padding:10px;
-        border-radius:12px;
-        box-shadow:0 4px 12px rgba(0,0,0,0.3);
+        gap:10px;
     ">
 
-        <input id="buscarHogar" type="text"
-            placeholder="Buscar correlativo..."
-            style="
-                padding:6px;
-                width:220px;
-                border:1px solid #ccc;
-                border-radius:6px;
-                outline:none;
+        <div style="
+            display:flex;
+            align-items:center;
+            gap:6px;
+            background:white;
+            padding:10px;
+            border-radius:12px;
+            box-shadow:0 4px 12px rgba(0,0,0,0.3);
         ">
 
-        <button onclick="buscarHogar()" style="
-            padding:6px 12px;
-            border:none;
-            background:#0d6efd;
-            color:white;
-            border-radius:6px;
-            cursor:pointer;">
-            Buscar
-        </button>
+            <input id="buscarHogar" type="text"
+                placeholder="Buscar correlativo..."
+                style="
+                    padding:6px;
+                    width:220px;
+                    border:1px solid #ccc;
+                    border-radius:6px;
+                    outline:none;
+            ">
 
+            <button onclick="buscarHogar()" style="
+                padding:6px 12px;
+                border:none;
+                background:#0d6efd;
+                color:white;
+                border-radius:6px;
+                cursor:pointer;">
+                Buscar
+            </button>
+
+        </div>
     </div>
-</div>
 
-<script>
+    <script>
 
-const hogares = {coords_json};
-const logsCasos = {logs_json};
+    const hogares = {coords_json};
+    const logsCasos = {logs_json};
 
-let circuloBusqueda = null;
-let heatCaso = null;
+    let circuloBusqueda = null;
+    let heatCaso = null;
+    let puntosGPS = null;
 
-function buscarHogar() {{
+    function buscarHogar() {{
 
-    const input = document.getElementById("buscarHogar");
-    const valor = input.value.trim();
-    const mapa = window["{map_name}"];
+        const input = document.getElementById("buscarHogar");
+        const valor = input.value.trim();
+        const mapa = window["{map_name}"];
 
-    if (!mapa) {{
-        alert("Mapa no cargado aún");
-        return;
-    }}
-
-    // ===============================
-    // LIMPIAR BUSQUEDA
-    // ===============================
-
-    if (valor === "") {{
-
-        if (circuloBusqueda) {{
-            mapa.removeLayer(circuloBusqueda);
-            circuloBusqueda = null;
+        if (!mapa) {{
+            alert("Mapa no cargado aún");
+            return;
         }}
-
-        if (heatCaso) {{
-            mapa.removeLayer(heatCaso);
-            heatCaso = null;
-        }}
-
-        mapa.eachLayer(function(layer){{
-
-            if(layer._name === "heat_presencial"){{
-                mapa.addLayer(layer)
-            }}
-
-            if(layer._name === "heat_telefonico"){{
-                mapa.addLayer(layer)
-            }}
-
-        }})
-
-        return;
-    }}
-
-    // ===============================
-    // BUSCAR CORRELATIVO
-    // ===============================
-
-    if (hogares[valor]) {{
-
-        const lat = hogares[valor].lat;
-        const lon = hogares[valor].lon;
-
-        mapa.setView([lat, lon], 18);
-
-        console.log("correlativo buscado:", valor);
-        console.log("logs del caso:", logsCasos[valor]);
-
-        if (circuloBusqueda) {{
-            mapa.removeLayer(circuloBusqueda);
-        }}
-
-        circuloBusqueda = L.circle([lat, lon], {{
-            color: 'red',
-            fillColor: '#ff0000',
-            fillOpacity: 0.3,
-            radius: 80
-        }}).addTo(mapa);
 
         // ===============================
-        // HEATMAP DEL CASO
+        // LIMPIAR BUSQUEDA
         // ===============================
 
-        if (heatCaso) {{
-            mapa.removeLayer(heatCaso);
+        if (valor === "") {{
+
+            if (circuloBusqueda) {{
+                mapa.removeLayer(circuloBusqueda);
+                circuloBusqueda = null;
+            }}
+
+            if (heatCaso) {{
+                mapa.removeLayer(heatCaso);
+                heatCaso = null;
+            }}
+
+            if (puntosGPS) {{
+                mapa.removeLayer(puntosGPS);
+                puntosGPS = null;
+            }}
+
+            mapa.eachLayer(function(layer) {{
+
+                if (layer._name === "heat_presencial") {{
+                    mapa.addLayer(layer);
+                }}
+
+                if (layer._name === "heat_telefonico") {{
+                    mapa.addLayer(layer);
+                }}
+
+            }});
+
+            return;
         }}
 
-        if (logsCasos[valor]) {{
+        // ===============================
+        // BUSCAR CORRELATIVO
+        // ===============================
 
-            heatCaso = L.heatLayer(logsCasos[valor], {{
-                radius: 60,
-                blur: 40,
-                maxZoom: 18,
-                gradient: {{
-                    0.2: 'blue',
+        if (hogares[valor]) {{
+
+            const lat = hogares[valor].lat;
+            const lon = hogares[valor].lon;
+
+            mapa.setView([lat, lon], 18);
+
+            console.log("correlativo buscado:", valor);
+            console.log("logs del caso:", logsCasos[valor]);
+
+            if (circuloBusqueda) {{
+                mapa.removeLayer(circuloBusqueda);
+            }}
+
+            circuloBusqueda = L.circle([lat, lon], {{
+                color: 'red',
+                fillColor: '#ff0000',
+                fillOpacity: 0.3,
+                radius: 80
+            }}).addTo(mapa);
+
+            // ===============================
+            // HEATMAP DEL CASO
+            // ===============================
+
+            if (heatCaso) {{
+                mapa.removeLayer(heatCaso);
+            }}
+
+            if (puntosGPS) {{
+                mapa.removeLayer(puntosGPS);
+            }}
+
+            if (logsCasos[valor]) {{
+
+                heatCaso = L.heatLayer(logsCasos[valor], {{
+                    radius: 60,
+                    blur: 40,
+                    maxZoom: 18,
+                    gradient: {{
+                        0.2: 'blue',
                     0.4: 'lime',
                     0.6: 'yellow',
                     0.8: 'orange',
@@ -1371,30 +1924,42 @@ function buscarHogar() {{
                 }}
             }}).addTo(mapa);
 
-            // puntos GPS reales
-            logsCasos[valor].forEach(function(p){{
+            // 🔥 grupo de puntos GPS
+            puntosGPS = L.layerGroup();
 
-                L.circleMarker(p,{{
-                    radius:4,
-                    color:'yellow',
-                    fillColor:'yellow',
-                    fillOpacity:0.9
-                }}).addTo(mapa);
+            logsCasos[valor].forEach(function(p) {{
+
+                let lat = p.lat;
+                let lon = p.lon;
+
+                let marker = L.circleMarker([lat, lon], {{
+                    radius: 4,
+                    color: 'yellow',
+                    fillColor: 'yellow',
+                    fillOpacity: 0.9
+                }});
+
+                // 🔥 LOGTIPO en tooltip
+                marker.bindTooltip("📌 " + (p.tipo || "GPS"));
+
+                puntosGPS.addLayer(marker);
 
             }});
+
+            puntosGPS.addTo(mapa);
         }}
 
-        mapa.eachLayer(function(layer){{
+        mapa.eachLayer(function(layer) {{
 
-            if(layer._name === "heat_presencial"){{
-                mapa.removeLayer(layer)
+            if (layer._name === "heat_presencial") {{
+                mapa.removeLayer(layer);
             }}
 
-            if(layer._name === "heat_telefonico"){{
-                mapa.removeLayer(layer)
+            if (layer._name === "heat_telefonico") {{
+                mapa.removeLayer(layer);
             }}
 
-        }})
+        }});
 
     }} else {{
 
@@ -1404,13 +1969,13 @@ function buscarHogar() {{
 
 }}
 
-document.addEventListener("DOMContentLoaded", function(){{
+document.addEventListener("DOMContentLoaded", function() {{
 
     const input = document.getElementById("buscarHogar");
 
     if (input) {{
-        input.addEventListener("keypress", function(e){{
-            if (e.key === "Enter"){{
+        input.addEventListener("keypress", function(e) {{
+            if (e.key === "Enter") {{
                 buscarHogar();
             }}
         }});
@@ -1422,9 +1987,9 @@ document.addEventListener("DOMContentLoaded", function(){{
     let offsetY = 0;
     let isDragging = false;
 
-    dragElement.addEventListener("mousedown", function(e){{
+    dragElement.addEventListener("mousedown", function(e) {{
 
-        if (e.target.tagName === "INPUT" || e.target.tagName === "BUTTON"){{
+        if (e.target.tagName === "INPUT" || e.target.tagName === "BUTTON") {{
             return;
         }}
 
@@ -1433,15 +1998,15 @@ document.addEventListener("DOMContentLoaded", function(){{
         offsetY = e.clientY - dragElement.offsetTop;
     }});
 
-    document.addEventListener("mousemove", function(e){{
-        if (isDragging){{
+    document.addEventListener("mousemove", function(e) {{
+        if (isDragging) {{
             dragElement.style.left = (e.clientX - offsetX) + "px";
             dragElement.style.top = (e.clientY - offsetY) + "px";
             dragElement.style.right = "auto";
         }}
     }});
 
-    document.addEventListener("mouseup", function(){{
+    document.addEventListener("mouseup", function() {{
         isDragging = false;
     }});
 
@@ -1846,16 +2411,11 @@ function aplicarFiltroEstado() {{
 
     html = mapa.get_root().render()
 
-    html += """
+    html += f"""
     <script>
-    var SID_ACTUAL = "__SID__";
-
-    function cerrarSesion() {
-        fetch("/cerrar_panel?sid=" + SID_ACTUAL, {
-            method: "GET",
-            keepalive: true
-        });
-    }
+    function cerrarSesion() {{
+        navigator.sendBeacon("/cerrar_panel?sid={sid}");
+    }}
 
     window.addEventListener("beforeunload", cerrarSesion);
     window.addEventListener("pagehide", cerrarSesion);
