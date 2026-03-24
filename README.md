@@ -43,7 +43,6 @@ Abrir en navegador: http://localhost:8000/panel?encuesta=XXX&usuario=XXX
 ## 👨‍💻 Autor
 
 Rodrigo Perez\
-Proyecto desarrollado para el Instituto Nacional de Estadística (INE)
 
 ------------------------------------------------------------------------
 
