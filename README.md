@@ -32,14 +32,6 @@ Incluye:
 
 ------------------------------------------------------------------------
 
-## ▶️ Ejecución
-
-uvicorn api_panel:app --reload
-
-Abrir en navegador: http://localhost:8000/panel?encuesta=XXX&usuario=XXX
-
-------------------------------------------------------------------------
-
 ## 👨‍💻 Autor
 
 Rodrigo Perez\
