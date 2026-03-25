@@ -28,7 +28,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ruta_geo = os.path.join(
     BASE_DIR,
     "zonas_ejes_para_webmap_smr",
-    "eje_ide_2025_precision5.geojson"
+    "ejes_ide_24022026.geojson"
 )
 
 with open(ruta_geo, "r", encoding="utf-8") as f:
@@ -431,6 +431,7 @@ def panel(request: Request, sid: str = Query(...)):
         d.DOMNROPUERTA,
         d.DOMDEPARTAMENTO,
         d.DOMLOCALIDAD,
+        d.DOMESTRATO,
         d.DOMMODALIDAD,      
         d.DOMESTADO,
         d.DOMCONGLOMERADO
@@ -595,8 +596,8 @@ def panel(request: Request, sid: str = Query(...)):
 
 
         # ===============================
-    # 🔴 CODCOMP EN DOMICILIOS PERO NO EN GEOJSON
-    # ===============================
+        # 🔴 CODCOMP EN DOMICILIOS PERO NO EN GEOJSON
+        # ===============================
 
     codcomp_geojson = set(
         normalizar_cod(f.get("properties", {}).get("codcomp", ""))
@@ -1100,115 +1101,42 @@ def panel(request: Request, sid: str = Query(...)):
     else:
         centro = [df_dom["LAT"].mean(), df_dom["LON"].mean()]
 
-    # ===============================
-    # MAPA BASE PROFESIONAL
-    # ===============================
-
     mapa = folium.Map(
-        location=centro,
-        zoom_start=10,
-        tiles="OpenStreetMap",   #  Abre con calles visibles
-        control_scale=True
-    )
-    
+    location=centro,
+    zoom_start=10,
+    tiles="OpenStreetMap",
+    control_scale=True
+)
 
-         # ===============================
-    # 🛣️ CAPA CALLES (EJES + NOMBRES)
+    # ===============================
+    # 🛣️ CAPA CALLES PRO
     # ===============================
 
     fg_calles = folium.FeatureGroup(
-        name="🛣️ Ejes",
+        name="🛣️ Ejes IDE",
         show=False
     )
 
-    # 🔴 LINEAS ROJAS
     folium.GeoJson(
         geo_calles,
         style_function=lambda f: {
-            "color": "red",
-            "weight": 1.5,
-            "opacity": 0.4
-        }
+            "color": "#4a90e2",
+            "weight": 2.5,
+            "opacity": 0.7
+        },
+        highlight_function=lambda f: {
+            "color": "#00ffff",
+            "weight": 6,
+            "opacity": 1
+
+        },
+        tooltip=folium.GeoJsonTooltip(
+            fields=["nombre"],  # o "NOMBRE"
+            aliases=["Calle IDE:"],
+            sticky=True
+        )
     ).add_to(fg_calles)
 
-
-    # ===============================
-    # 🧠 NOMBRES DE CALLES
-    # ===============================
-
-    for i, f in enumerate(geo_calles["features"]):
-
-        props = f.get("properties", {})
-        nombre = props.get("nombre") or props.get("NOMBRE") or ""
-        nombre = str(nombre).strip()
-
-        if not nombre:
-            continue
-
-        geom = f.get("geometry")
-        if not geom:
-            continue
-
-        # 🔥 OPTIMIZACIÓN (NO CARGAR TODO)
-        if i % 50 != 0:
-            continue
-
-        # 🔥 MULTILINESTRING
-        if geom["type"] == "MultiLineString":
-
-            for linea in geom["coordinates"]:
-
-                if not linea:
-                    continue
-
-                lon, lat = linea[len(linea)//2]
-
-                folium.Marker(
-                    location=[lat, lon],
-                    icon=folium.DivIcon(html=f"""
-                        <div style="
-                            font-size:10px;
-                            color:red;
-                            font-weight:bold;
-                            text-shadow: 1px 1px 2px white;
-                            background: rgba(255,255,255,0.5);
-                            padding:2px 4px;
-                            border-radius:4px;
-                            white-space: nowrap;
-                        ">
-                            {nombre}
-                        </div>
-                    """)
-                ).add_to(fg_calles)
-
-        # 🔵 POR SI HAY LINESTRING
-        elif geom["type"] == "LineString":
-
-            coords = geom["coordinates"]
-
-            if coords:
-                lon, lat = coords[len(coords)//2]
-
-                folium.Marker(
-                    location=[lat, lon],
-                    icon=folium.DivIcon(html=f"""
-                        <div style="
-                            font-size:10px;
-                            color:red;
-                            font-weight:bold;
-                            text-shadow: 1px 1px 2px white;
-                            background: rgba(255,255,255,0.5);
-                            padding:2px 4px;
-                            border-radius:4px;
-                            white-space: nowrap;
-                        ">
-                            {nombre}
-                        </div>
-                    """)
-                ).add_to(fg_calles)
-
-
-    # 🔥 AGREGAR AL MAPA
     fg_calles.add_to(mapa)
 
 
@@ -1370,7 +1298,7 @@ def panel(request: Request, sid: str = Query(...)):
     # ===============================
 # 🟢 ZONAS DEL ENCUESTADOR (FIX FINAL)
 # ===============================
-
+    
     print("TOTAL GEO ORIGINAL:", len(geo_zonas["features"]))
     print("TOTAL GEO FILTRADO:", len(geo_zonas_filtrado["features"]))
 
@@ -1416,7 +1344,7 @@ def panel(request: Request, sid: str = Query(...)):
             },
             tooltip=folium.GeoJsonTooltip(
                 fields=["codcomp"],
-                aliases=["Zona Geojson:"]
+                aliases=["Zona codcomp:"]
             )
         ).add_to(fg_zonas_presencial)
 
@@ -1431,7 +1359,7 @@ def panel(request: Request, sid: str = Query(...)):
             },
             tooltip=folium.GeoJsonTooltip(
                 fields=["codcomp"],
-                aliases=["Zona Geojson:"]
+                aliases=["Zona codcomp:"]
             )
         ).add_to(fg_zonas_telefonico)
 
@@ -1615,15 +1543,15 @@ def panel(request: Request, sid: str = Query(...)):
                 ).add_to(fg_heat_caso)
 
             # 📍 puntos GPS reales del encuestador
-        for lat, lon in heat_caso:
-                folium.CircleMarker(
-                    location=[lat, lon],
-                    radius=4,
-                    color="yellow", 
-                    fill=True,
-                    fill_color="yellow",
-                    fill_opacity=0.9
-                ).add_to(fg_heat_caso)
+        #for lat, lon in heat_caso:
+         #       folium.CircleMarker(
+          #          location=[lat, lon],
+           #         radius=4,
+            #        color="yellow", 
+             #       fill=True,
+              #      fill_color="yellow",
+               #     fill_opacity=0.9
+                #).add_to(fg_heat_caso)
 
 
 
@@ -1763,6 +1691,7 @@ def panel(request: Request, sid: str = Query(...)):
             <b>📍 Dirección:</b> {row['DOMNOMCALLE']} {row['DOMNROPUERTA']}<br>
             <b>🗺️ Departamento:</b> {row['DOMDEPARTAMENTO']}<br>
             <b>🏙️ Localidad:</b> {row['DOMLOCALIDAD']}<br> 
+            <b>🏷️ Estrato:</b> {row['DOMESTRATO']}<br>
             <b>📌 Modalidad:</b> {modalidad}<br>
             <b>📊 Estado:</b> {estado}<br>
             <b>🧩 Metadata:</b> {version_usada if version_usada else 'Sin registro'}<br>
@@ -1801,7 +1730,7 @@ def panel(request: Request, sid: str = Query(...)):
 
     folium.LayerControl(
         position="topright",
-        collapsed=True
+        collapsed=False
     ).add_to(mapa)
     
     # ===============================
