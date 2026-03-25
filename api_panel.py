@@ -16,7 +16,7 @@ import os
 from dotenv import load_dotenv
 import base64
 import uuid
-
+print("🔥🔥🔥 API_PANEL CORRIENDO 🔥🔥🔥")
 
 # ===============================
 # CARGAR CALLES
@@ -1110,7 +1110,135 @@ def panel(request: Request, sid: str = Query(...)):
         tiles="OpenStreetMap",   #  Abre con calles visibles
         control_scale=True
     )
-     
+    
+
+         # ===============================
+    # 🛣️ CAPA CALLES (EJES + NOMBRES)
+    # ===============================
+
+    fg_calles = folium.FeatureGroup(
+        name="🛣️ Ejes",
+        show=False
+    )
+
+    # 🔴 LINEAS ROJAS
+    folium.GeoJson(
+        geo_calles,
+        style_function=lambda f: {
+            "color": "red",
+            "weight": 1.5,
+            "opacity": 0.4
+        }
+    ).add_to(fg_calles)
+
+
+    # ===============================
+    # 🧠 NOMBRES DE CALLES
+    # ===============================
+
+    for i, f in enumerate(geo_calles["features"]):
+
+        props = f.get("properties", {})
+        nombre = props.get("nombre") or props.get("NOMBRE") or ""
+        nombre = str(nombre).strip()
+
+        if not nombre:
+            continue
+
+        geom = f.get("geometry")
+        if not geom:
+            continue
+
+        # 🔥 OPTIMIZACIÓN (NO CARGAR TODO)
+        if i % 50 != 0:
+            continue
+
+        # 🔥 MULTILINESTRING
+        if geom["type"] == "MultiLineString":
+
+            for linea in geom["coordinates"]:
+
+                if not linea:
+                    continue
+
+                lon, lat = linea[len(linea)//2]
+
+                folium.Marker(
+                    location=[lat, lon],
+                    icon=folium.DivIcon(html=f"""
+                        <div style="
+                            font-size:10px;
+                            color:red;
+                            font-weight:bold;
+                            text-shadow: 1px 1px 2px white;
+                            background: rgba(255,255,255,0.5);
+                            padding:2px 4px;
+                            border-radius:4px;
+                            white-space: nowrap;
+                        ">
+                            {nombre}
+                        </div>
+                    """)
+                ).add_to(fg_calles)
+
+        # 🔵 POR SI HAY LINESTRING
+        elif geom["type"] == "LineString":
+
+            coords = geom["coordinates"]
+
+            if coords:
+                lon, lat = coords[len(coords)//2]
+
+                folium.Marker(
+                    location=[lat, lon],
+                    icon=folium.DivIcon(html=f"""
+                        <div style="
+                            font-size:10px;
+                            color:red;
+                            font-weight:bold;
+                            text-shadow: 1px 1px 2px white;
+                            background: rgba(255,255,255,0.5);
+                            padding:2px 4px;
+                            border-radius:4px;
+                            white-space: nowrap;
+                        ">
+                            {nombre}
+                        </div>
+                    """)
+                ).add_to(fg_calles)
+
+
+    # 🔥 AGREGAR AL MAPA
+    fg_calles.add_to(mapa)
+
+
+    mapa.get_root().html.add_child(folium.Element("""
+    <script>
+
+    map.on('zoomend', function() {
+
+        let zoom = map.getZoom();
+
+        document.querySelectorAll('.leaflet-marker-icon').forEach(el => {
+
+            if (zoom < 15){
+                el.style.display = "none";
+            } else {
+                el.style.display = "block";
+            }
+
+        });
+
+    });
+
+    </script>
+    """))
+
+
+
+
+
+
     # ===============================
     # CONTROLES TIPO GIS
     # ===============================
@@ -1199,26 +1327,7 @@ def panel(request: Request, sid: str = Query(...)):
         show=False      # 🔥 OPCIONAL: no cargar por defecto
     ).add_to(mapa)
 
-      # ===============================
-    # 🛣️ CAPA CALLES
-    # ===============================
-    fg_calles = folium.FeatureGroup(
-        name="🛣️ Ejes",
-        show=False
-    )
-     
-
-     
-    folium.GeoJson(
-        geo_calles,
-        style_function=lambda f: {
-            "color": "blue",
-            "weight": 1,
-            "opacity": 0.5
-        }
-    ).add_to(fg_calles)
-
-    fg_calles.add_to(mapa)
+  
 
     # ===============================
     # 🗺️ TODAS LAS ZONAS (ROJO = SIN DATOS)
