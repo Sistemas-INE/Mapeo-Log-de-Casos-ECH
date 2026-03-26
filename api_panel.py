@@ -249,7 +249,7 @@ def panel(request: Request, sid: str = Query(...)):
     coords_log_por_caso = {}
 
     # ===============================
-    # VALIDAR SID
+    # VALIDAR SIDd
     # ===============================
 
     if sid not in sesiones:
@@ -485,7 +485,46 @@ def panel(request: Request, sid: str = Query(...)):
 
     df_dom = pd.DataFrame(rows, columns=[col[0] for col in cursor.description])
 
+    # # ===============================
+    # # 📊 CAUSALES PARA GRÁFICO
+    # # ===============================
+    # schema_domicilios = schema
+    # schema_causas = "SMRPROD"
 
+
+    # query_causales = f"""
+    # SELECT
+    #     d.DOMCAUSA,
+    #     CASE 
+    #         WHEN d.DOMCAUSA = 1 THEN 'Realizada'
+    #         ELSE c.CAUDESCRIPCION
+    #     END AS DESCRIPCION,
+    #     COUNT(*) AS CANTIDAD
+    # FROM {schema}.DOMICILIOS d
+    # LEFT JOIN {schema}.CAUSAS c 
+    #     ON c.CAUCODIGO = d.DOMCAUSA
+    #     AND c.CFGENCUESTA = d.CFGENCUESTA
+    # WHERE d.CFGENCUESTA = :encuesta
+    # AND TRIM(UPPER(d.DOMUSRENCUESTADOR)) = :usuario
+    # GROUP BY d.DOMCAUSA, 
+    #     CASE 
+    #         WHEN d.DOMCAUSA = 1 THEN 'Realizada'
+    #         ELSE c.CAUDESCRIPCION
+    #     END
+    # ORDER BY CANTIDAD DESC
+    # """
+
+    # df_causales = pd.read_sql(query_causales, conn, params={
+    #     "encuesta": encuesta,
+    #     "usuario": usuario
+    # })
+
+    # causales_dict = dict(zip(
+    #     df_causales["CAUDESCRIPCION"],
+    #     df_causales["CANTIDAD"]
+    # ))
+
+    # causales_json = json.dumps(causales_dict)
 
 
     # ===============================
@@ -1801,8 +1840,12 @@ def panel(request: Request, sid: str = Query(...)):
 """))
 
 
-    # ===============================
+   # ===============================
 # BUSCADOR MOVIBLE
+# ===============================
+
+    # ===============================
+# BUSCADOR MOVIBLE (SIN F-STRING)
 # ===============================
 
     coords_json = json.dumps(coords_por_hogar)
@@ -1810,9 +1853,9 @@ def panel(request: Request, sid: str = Query(...)):
     mostrar_buscador = not correlativo
     map_name = mapa.get_name()
 
-    buscador_html = f"""
+    buscador_html = """
     <div id="buscadorMovible" style="
-        display: {'flex' if mostrar_buscador else 'none'};
+        display: """ + ("flex" if mostrar_buscador else "none") + """;
         position: fixed;
         bottom: 500px;
         right: 20px;
@@ -1856,202 +1899,215 @@ def panel(request: Request, sid: str = Query(...)):
 
     <script>
 
-    const hogares = {coords_json};
-    const logsCasos = {logs_json};
+    var hogares = """ + coords_json + """;
+    var logsCasos = """ + logs_json + """;
 
-    let circuloBusqueda = null;
-    let heatCaso = null;
-    let puntosGPS = null;
+    var circuloBusqueda = null;
+    var heatCaso = null;
 
-    function buscarHogar() {{
+    function buscarHogar() {
 
-        const input = document.getElementById("buscarHogar");
-        const valor = input.value.trim();
-        const mapa = window["{map_name}"];
+        var input = document.getElementById("buscarHogar");
+        var valor = input.value.trim();
+        valor = valor.replace(/\\s+/g, "");
 
-        if (!mapa) {{
+        var mapa = Object.values(window).find(obj => obj instanceof L.Map);
+
+        if (!mapa) {
             alert("Mapa no cargado aún");
             return;
-        }}
+        }
 
         // ===============================
         // LIMPIAR BUSQUEDA
         // ===============================
 
-        if (valor === "") {{
+        if (valor === "") {
 
-            if (circuloBusqueda) {{
+            if (circuloBusqueda) {
                 mapa.removeLayer(circuloBusqueda);
                 circuloBusqueda = null;
-            }}
+            }
 
-            if (heatCaso) {{
+            if (heatCaso) {
                 mapa.removeLayer(heatCaso);
                 heatCaso = null;
-            }}
-
-            if (puntosGPS) {{
-                mapa.removeLayer(puntosGPS);
-                puntosGPS = null;
-            }}
-
-            mapa.eachLayer(function(layer) {{
-
-                if (layer._name === "heat_presencial") {{
-                    mapa.addLayer(layer);
-                }}
-
-                if (layer._name === "heat_telefonico") {{
-                    mapa.addLayer(layer);
-                }}
-
-            }});
+            }
 
             return;
-        }}
+        }
 
         // ===============================
         // BUSCAR CORRELATIVO
         // ===============================
 
-        if (hogares[valor]) {{
+        if (hogares[valor]) {
 
-            const lat = hogares[valor].lat;
-            const lon = hogares[valor].lon;
+            var lat = hogares[valor].lat;
+            var lon = hogares[valor].lon;
 
             mapa.setView([lat, lon], 18);
 
-            console.log("correlativo buscado:", valor);
-            console.log("logs del caso:", logsCasos[valor]);
+            console.log("correlativo:", valor);
+            console.log("logs:", logsCasos[valor]);
 
-            if (circuloBusqueda) {{
+            // ===============================
+            // CIRCULO
+            // ===============================
+
+            if (circuloBusqueda) {
                 mapa.removeLayer(circuloBusqueda);
-            }}
+            }
 
-            circuloBusqueda = L.circle([lat, lon], {{
+            circuloBusqueda = L.circle([lat, lon], {
                 color: 'red',
                 fillColor: '#ff0000',
                 fillOpacity: 0.3,
-                radius: 80
-            }}).addTo(mapa);
+                radius: 70
+            }).addTo(mapa);
 
             // ===============================
-            // HEATMAP DEL CASO
+            // LIMPIAR HEATMAP
             // ===============================
 
-            if (heatCaso) {{
+            if (heatCaso) {
                 mapa.removeLayer(heatCaso);
-            }}
+                heatCaso = null;
+            }
 
-            if (puntosGPS) {{
-                mapa.removeLayer(puntosGPS);
-            }}
+        } else {
 
-            if (logsCasos[valor]) {{
+            alert("Correlativo no encontrado");
+        }
+    }
 
-                heatCaso = L.heatLayer(logsCasos[valor], {{
-                    radius: 60,
-                    blur: 40,
-                    maxZoom: 18,
-                    gradient: {{
-                        0.2: 'blue',
-                    0.4: 'lime',
-                    0.6: 'yellow',
-                    0.8: 'orange',
-                    1.0: 'red'
-                }}
-            }}).addTo(mapa);
+    // ===============================
+    // EVENTOS
+    // ===============================
 
-            // 🔥 grupo de puntos GPS
-            puntosGPS = L.layerGroup();
+    document.addEventListener("DOMContentLoaded", function() {
 
-            logsCasos[valor].forEach(function(p) {{
+        var input = document.getElementById("buscarHogar");
 
-                let lat = p.lat;
-                let lon = p.lon;
+        if (input) {
+            input.addEventListener("keypress", function(e) {
+                if (e.key === "Enter") {
+                    buscarHogar();
+                }
+            });
+        }
 
-                let marker = L.circleMarker([lat, lon], {{
-                    radius: 4,
-                    color: 'yellow',
-                    fillColor: 'yellow',
-                    fillOpacity: 0.9
-                }});
+        var dragElement = document.getElementById("buscadorMovible");
 
-                // 🔥 LOGTIPO en tooltip
-                marker.bindTooltip("📌 " + (p.tipo || "GPS"));
+        var offsetX = 0;
+        var offsetY = 0;
+        var isDragging = false;
 
-                puntosGPS.addLayer(marker);
+        dragElement.addEventListener("mousedown", function(e) {
 
-            }});
+            if (e.target.tagName === "INPUT" || e.target.tagName === "BUTTON") {
+                return;
+            }
 
-            puntosGPS.addTo(mapa);
-        }}
+            isDragging = true;
+            offsetX = e.clientX - dragElement.offsetLeft;
+            offsetY = e.clientY - dragElement.offsetTop;
+        });
 
-        mapa.eachLayer(function(layer) {{
+        document.addEventListener("mousemove", function(e) {
+            if (isDragging) {
+                dragElement.style.left = (e.clientX - offsetX) + "px";
+                dragElement.style.top = (e.clientY - offsetY) + "px";
+                dragElement.style.right = "auto";
+            }
+        });
 
-            if (layer._name === "heat_presencial") {{
-                mapa.removeLayer(layer);
-            }}
+        document.addEventListener("mouseup", function() {
+            isDragging = false;
+        });
 
-            if (layer._name === "heat_telefonico") {{
-                mapa.removeLayer(layer);
-            }}
+    });
 
-        }});
+    // ===============================
+    // ACTIVAR HEATMAP CON CAPA 🔥
+    // ===============================
 
-    }} else {{
+    document.addEventListener("DOMContentLoaded", function() {
 
-        alert("Correlativo no encontrado");
+        var mapa = Object.values(window).find(obj => obj instanceof L.Map);
 
-    }}
+        if (!mapa) return;
 
-}}
+        mapa.on('overlayadd', function(e) {
 
-document.addEventListener("DOMContentLoaded", function() {{
+            console.log("Capa activada:", e.name);
 
-    const input = document.getElementById("buscarHogar");
+            if (e.name === "🎯 Mapa Calor del Caso") {
 
-    if (input) {{
-        input.addEventListener("keypress", function(e) {{
-            if (e.key === "Enter") {{
-                buscarHogar();
-            }}
-        }});
-    }}
+                var input = document.getElementById("buscarHogar");
+                var valor = input.value.trim();
+                valor = valor.replace(/\s+/g, "");
 
-    const dragElement = document.getElementById("buscadorMovible");
+                if (!valor) return;
 
-    let offsetX = 0;
-    let offsetY = 0;
-    let isDragging = false;
+                // limpiar anterior
+                if (heatCaso) {
+                    mapa.removeLayer(heatCaso);
+                    heatCaso = null;
+                }
 
-    dragElement.addEventListener("mousedown", function(e) {{
+                // 🔥 USAR logsCasos 
+                if (logsCasos[valor] && logsCasos[valor].length > 0) {
 
-        if (e.target.tagName === "INPUT" || e.target.tagName === "BUTTON") {{
-            return;
-        }}
+                    var puntos = [];
 
-        isDragging = true;
-        offsetX = e.clientX - dragElement.offsetLeft;
-        offsetY = e.clientY - dragElement.offsetTop;
-    }});
+                    for (var i = 0; i < logsCasos[valor].length; i++) {
+                        var p = logsCasos[valor][i];
 
-    document.addEventListener("mousemove", function(e) {{
-        if (isDragging) {{
-            dragElement.style.left = (e.clientX - offsetX) + "px";
-            dragElement.style.top = (e.clientY - offsetY) + "px";
-            dragElement.style.right = "auto";
-        }}
-    }});
+                        if (p.lat != null && p.lon != null) {
+                            puntos.push([p.lat, p.lon]);
+                        }
+                    }
 
-    document.addEventListener("mouseup", function() {{
-        isDragging = false;
-    }});
+                    if (puntos.length > 0) {
 
-}});
+                        heatCaso = L.heatLayer(puntos, {
+                            radius: 12,
+                            blur: 8,
+                            maxZoom: 18,
+                            minOpacity: 0.5,
+                            gradient: {
+                                0.2: 'blue',
+                                0.4: 'lime',
+                                0.6: 'yellow',
+                                0.8: 'orange',
+                                1.0: 'red'
+                            }
+                        }).addTo(mapa);
 
-</script>
-"""
+                        // ===============================
+                  
+                
+                    }
+                }
+            }
+        });
+
+        mapa.on('overlayremove', function(e) {
+
+            if (e.name === "🎯 Mapa Calor del Caso") {
+
+                if (heatCaso) {
+                    mapa.removeLayer(heatCaso);
+                    heatCaso = null;
+                }
+            }
+        });
+
+    });
+
+    </script>
+    """
 
     mapa.get_root().html.add_child(folium.Element(buscador_html))
 
@@ -2090,6 +2146,16 @@ document.addEventListener("DOMContentLoaded", function() {{
         display:flex;
         gap:8px;
     ">
+        <button onclick="toggleCausales()" style="
+            padding:8px 14px;
+            background:#6f42c1;
+            color:white;
+            border:none;
+            border-radius:8px;
+            cursor:pointer;">
+            📊 Causales
+        </button>    
+    
 
         <button onclick="toggleEstados()" style="
             padding:8px 14px;
@@ -2156,7 +2222,30 @@ document.addEventListener("DOMContentLoaded", function() {{
             </tbody>
         </table>
     </div>
+    
+    <!-- PANEL CAUSALES -->
+    <div id="panelCausales" style="
+        display:none;
+        position: fixed;
+        bottom: 160px;
+        right: 20px;
+        background:white;
+        padding:15px;
+        border-radius:10px;
+        box-shadow:0 4px 12px rgba(0,0,0,0.3);
+        min-width:420px;
+        z-index:9999;">
 
+        <div style="font-weight:bold; margin-bottom:10px; text-align:center;">
+            📊 Desglose por Causales
+        </div>
+
+        <canvas id="graficoCausales" style="width:100%; height:250px;"></canvas>
+
+    </div>
+
+
+     
     <!-- PANEL ACTIVIDAD -->
     <div id="panelActividad" style="
         display:none;
@@ -2211,7 +2300,11 @@ document.addEventListener("DOMContentLoaded", function() {{
 
     </div>
 
-   <script>
+
+   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <script>
+
 
 let estadosActivos = new Set();
 
@@ -2235,6 +2328,76 @@ function toggleMetadata() {{
     const meta = document.getElementById("panelMetadata");
     meta.style.display = meta.style.display === "none" ? "block" : "none";
 }}
+
+
+    function toggleCausales() {{
+
+        document.getElementById("panelEstados").style.display = "none";
+        document.getElementById("panelActividad").style.display = "none";
+        document.getElementById("panelMetadata").style.display = "none";
+
+        const panel = document.getElementById("panelCausales");
+
+        const abrir = panel.style.display === "none";
+
+        panel.style.display = abrir ? "block" : "none";
+
+        // 🔥 CREAR GRAFICO
+        if (abrir) {{
+
+            var canvas = document.getElementById("graficoCausales");
+
+            if (!canvas) {{
+                console.log("NO EXISTE canvas");
+                return;
+            }}
+
+            // 🔥 limpiar si ya existe
+            if (window.miGrafico) {{
+                window.miGrafico.destroy();
+            }}
+             
+            # var dataCausales = {causales_json};
+
+            // 🔥 COLORES DINÁMICOS
+            let labels = Object.keys(dataCausales);
+
+            let colores = labels.map(l => {{
+
+                let txt = l.toLowerCase();
+
+                if (txt.includes("realizada")) return "#28a745";   // verde
+                if (txt.includes("rechazo")) return "#dc3545";     // rojo
+                if (txt.includes("no contacto")) return "#fd7e14"; // naranja
+                if (txt.includes("visitas")) return "#ffc107";     // amarillo
+                if (txt.includes("ausencia")) return "#0dcaf0";    // celeste
+
+                return "#0d6efd"; // azul default
+
+            }});
+
+            window.miGrafico = new Chart(canvas, {{
+                type: 'bar',
+                data: {{
+                    labels: labels,
+                    datasets: [{{
+                        label: 'Cantidad',
+                        data: Object.values(dataCausales),
+                        backgroundColor: colores,
+                        borderColor: "#333",
+                        borderWidth: 1
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {{
+                        legend: {{ display: false }}
+                    }}
+                }}
+            }});
+        }}
+    }}
 
 function filtrarEstado(estado) {{
 
@@ -2272,6 +2435,12 @@ function aplicarFiltroEstado() {{
             el.parentElement.style.display = "block";
             return;
         }}
+
+     
+
+
+
+
 
         let visible = false;
 
