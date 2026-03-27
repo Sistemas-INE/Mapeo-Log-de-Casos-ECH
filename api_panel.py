@@ -1647,153 +1647,212 @@ def panel(request: Request, sid: str = Query(...)):
         show=not correlativo
     )
 
-
     cluster_presencial = MarkerCluster(
-        disableClusteringAtZoom=None,
         spiderfyOnMaxZoom=True,
         showCoverageOnHover=False,
-        maxClusterRadius=60
+        zoomToBoundsOnClick=True,
+        maxClusterRadius=40,
+        spiderfyDistanceMultiplier=2.5
     ).add_to(fg_presencial)
 
     cluster_telefonico = MarkerCluster(
-        disableClusteringAtZoom=None,
         spiderfyOnMaxZoom=True,
         showCoverageOnHover=False,
-        maxClusterRadius=60
+        zoomToBoundsOnClick=True,
+        maxClusterRadius=40,
+        spiderfyDistanceMultiplier=2.5
     ).add_to(fg_telefonico)
-    
-        # ===============================
-        # MARCADORES   
-        # ===============================
+
+    # ===============================
+    # PREPARACIÓN
+    # ===============================
 
     import math
+    from collections import defaultdict
+
     coords_por_hogar = {}
     desactualizados = []
-    coords_por_hogar_real = {}
 
-    for i, (_, row) in enumerate(df_dom.iterrows()):
+    # ===============================
+    # AGRUPAR POR COORDENADAS
+    # ===============================
 
-        estado = row["DOMESTADO"]
-        hogar = str(row["DOMCORRELATIVO"])
+    grupos = defaultdict(list)
 
-        registro_env = (
-            ultimo_env_por_hogar.loc[hogar]
-            if hogar in ultimo_env_por_hogar.index
-            else None
-        )
+    for _, row in df_dom.iterrows():
+        key = (row["LAT"], row["LON"])
+        grupos[key].append(row)
 
-        version_usada = None
-        fecha_envio = None
+    # ===============================
+    # RECORRER GRUPOS
+    # ===============================
 
-        if registro_env is not None:
-            version_usada = registro_env["VERSION_METADATA"]
-            fecha_envio = registro_env["LOGFECHAHORA"]
+    for key, lista in grupos.items():
 
-        version_correcta = True
+        for i, row in enumerate(lista):
 
-        if (
-            VERSION_OFICIAL
-            and FECHA_VERSION_OFICIAL is not None
-            and version_usada
-            and fecha_envio is not None
-        ):
-            version_limpia = version_usada.split("-")[-1].strip()
+            estado = row["DOMESTADO"]
+            hogar = str(row["DOMCORRELATIVO"])
+
+            modalidad = "Presencial" if row["DOMMODALIDAD"] == "P" else "Telefónica"
+
+            if modalidad == "Presencial":
+                color = "green"
+                emoji = "🏠"
+                destino = cluster_presencial
+            else:
+                color = "blue"
+                emoji = "☎️"
+                destino = cluster_telefonico
+
+            # ===============================
+            # VERSIONES
+            # ===============================
+            registro_env = (
+                ultimo_env_por_hogar.loc[hogar]
+                if hogar in ultimo_env_por_hogar.index
+                else None
+            )
+
+            version_usada = None
+            fecha_envio = None
+
+            if registro_env is not None:
+                version_usada = registro_env["VERSION_METADATA"]
+                fecha_envio = registro_env["LOGFECHAHORA"]
+
+            version_correcta = True
 
             if (
-                fecha_envio > FECHA_VERSION_OFICIAL
-                and version_limpia != VERSION_OFICIAL.strip()
+                VERSION_OFICIAL
+                and FECHA_VERSION_OFICIAL is not None
+                and version_usada
+                and fecha_envio is not None
             ):
-                version_correcta = False
+                version_limpia = version_usada.split("-")[-1].strip()
 
-        if not version_correcta:
-            desactualizados.append({
-                "hogar": hogar,
-                "usada": version_usada,
-                "oficial": VERSION_OFICIAL
-            })
+                if (
+                    fecha_envio > FECHA_VERSION_OFICIAL
+                    and version_limpia != VERSION_OFICIAL.strip()
+                ):
+                    version_correcta = False
 
-        modalidad = "Presencial" if row["DOMMODALIDAD"] == "P" else "Telefónica"
+            if not version_correcta:
+                desactualizados.append({
+                    "hogar": hogar,
+                    "usada": version_usada,
+                    "oficial": VERSION_OFICIAL
+                })
 
-        eventos = log_por_hogar.get(hogar)
+            # ===============================
+            # HISTORIAL
+            # ===============================
+            eventos = log_por_hogar.get(hogar)
 
-        historial = """
-        <details>
-            <summary><b>📜 Historial</b></summary>
-            <div style="
-                max-height:180px;
-                overflow-y:auto;
-                margin-top:6px;
-                padding:6px;
-                border:1px solid #ddd;
-                border-radius:6px;
-                background:#f8f9fa;
-                font-size:12px;
-            ">
-        """
+            historial = """
+            <details>
+                <summary><b>📜 Historial</b></summary>
+                <div style="
+                    max-height:180px;
+                    overflow-y:auto;
+                    margin-top:6px;
+                    padding:6px;
+                    border:1px solid #ddd;
+                    border-radius:6px;
+                    background:#f8f9fa;
+                    font-size:12px;
+                ">
+            """
 
-        if eventos is not None and not eventos.empty:
-            for _, ev in eventos.iterrows():
-                historial += f"{ev['LOGFECHAHORA']} - {ev['LOGTIPO']} - {ev['LOGACCION']}<br>"
-        else:
-            historial += "Sin registros"
+            if eventos is not None and not eventos.empty:
+                for _, ev in eventos.iterrows():
+                    historial += f"{ev['LOGFECHAHORA']} - {ev['LOGTIPO']} - {ev['LOGACCION']}<br>"
+            else:
+                historial += "Sin registros"
 
-        historial += "</details>"
+            historial += "</div></details>"
 
-        if modalidad == "Presencial":
-            color = "green"
-            emoji = "🏠"
-            destino = cluster_presencial
-        else:
-            color = "blue"
-            emoji = "☎️"
-            destino = cluster_telefonico
+            # ===============================
+            # SEPARACIÓN SI DUPLICADOS
+            # ===============================
+            if len(lista) > 1:
+                angle = (i * 30) % 360
+                radius = 0.00005
+            else:
+                angle = 0
+                radius = 0
 
-        #angle = (i * 30) % 360
-        #radius = 0.00022
+            lat = row["LAT"] + radius * math.cos(math.radians(angle))
+            lon = row["LON"] + radius * math.sin(math.radians(angle))
 
-        #lat = row["LAT"] + radius * math.cos(math.radians(angle))
-        #lon = row["LON"] + radius * math.sin(math.radians(angle))
-        lat = row["LAT"]
-        lon = row["LON"]
+            coords_por_hogar[hogar] = {
+                "lat": row["LAT"],
+                "lon": row["LON"]
+            }
 
-        coords_por_hogar[hogar] = {"lat": lat, "lon": lon}
+            # ===============================
+            # POPUP COMPLETO
+            # ===============================
+            popup_html = f"""
+            <div style="font-size:13px; width:340px">
+                <b>🏠 Domicilio:</b> {hogar}<br>
+                <b>📍 Dirección:</b> {row['DOMNOMCALLE']} {row['DOMNROPUERTA']}<br>
+                <b>🗺️ Departamento:</b> {row['DOMDEPARTAMENTO']}<br>
+                <b>🏙️ Localidad:</b> {row['DOMLOCALIDAD']}<br> 
+                <b>🏷️ Estrato:</b> {row['DOMESTRATO']}<br>
+                <b>📌 Modalidad:</b> {modalidad}<br>
+                <b>📊 Estado:</b> {estado}<br>
+                <b>🧩 Metadata:</b> {version_usada if version_usada else 'Sin registro'}<br>
+                <b>📌 Oficial:</b> {VERSION_OFICIAL if VERSION_OFICIAL else 'No definida'}<br>
+                {'<span style="color:red;font-weight:bold;">⚠ Versión desactualizada</span><br>' if not version_correcta else ''}
+                <hr>
+                {historial}
+            </div>
+            """
 
-        popup_html = f"""
-        <div style="font-size:13px; width:340px">
-            <b>🏠 Domicilio:</b> {hogar}<br>
-            <b>📍 Dirección:</b> {row['DOMNOMCALLE']} {row['DOMNROPUERTA']}<br>
-            <b>🗺️ Departamento:</b> {row['DOMDEPARTAMENTO']}<br>
-            <b>🏙️ Localidad:</b> {row['DOMLOCALIDAD']}<br> 
-            <b>🏷️ Estrato:</b> {row['DOMESTRATO']}<br>
-            <b>📌 Modalidad:</b> {modalidad}<br>
-            <b>📊 Estado:</b> {estado}<br>
-            <b>🧩 Metadata:</b> {version_usada if version_usada else 'Sin registro'}<br>
-            <b>📌 Oficial:</b> {VERSION_OFICIAL if VERSION_OFICIAL else 'No definida'}<br>
-            {'<span style="color:red;font-weight:bold;">⚠ Versión desactualizada</span><br>' if not version_correcta else ''}
-            <hr>
-            {historial}
-        </div>
-        """
+            # ===============================
+            # MARKER (UNO SOLO)
+            # ===============================
+            folium.Marker(
+                location=[lat, lon],
+                popup=popup_html,
+                tooltip=f"{modalidad} - {hogar}",
+                icon=folium.DivIcon(html=f"""
+                    <div class="marker-estado marker-estado-{estado}">
+                        <span>{emoji}</span>
+                        <span style="
+                            font-size:10px;
+                            font-weight:bold;
+                            color:#fff;
+                            background:{color};
+                            padding:3px 8px;
+                            border-radius:8px;">
+                            {hogar}
+                        </span>
+                    </div>
+                """)
+            ).add_to(destino)
+            # ===============================
+            # 🔥 GUARDAR MARCADORES PARA JS
+            # ===============================
+            script_marker = f"""
+            if (!window.marcadoresCluster) {{
+                window.marcadoresCluster = [];
+            }}
 
-        folium.Marker(
-            location=[lat, lon],
-            popup=popup_html,
-            tooltip=f"{modalidad} - {hogar}",
-            icon=folium.DivIcon(html=f"""
-                <div class="marker-estado marker-estado-{estado}">
-                    <span>{emoji}</span>
-                    <span style="
-                        font-size:10px;
-                        font-weight:bold;
-                        color:#fff;
-                        background:{color};
-                        padding:3px 8px;
-                        border-radius:8px;">
-                        {hogar}
-                    </span>
-                </div>
-            """)
-        ).add_to(destino)
+            window.marcadoresCluster.push({{
+                correlativo: "{hogar}",
+                lat: {lat},
+                lon: {lon}
+            }});
+            """
+
+            mapa.get_root().html.add_child(
+                folium.Element(f"<script>{script_marker}</script>")
+            )
+                    
+                
+        
         
     # ===============================
     # AGREGAR CAPAS AL MAPA (FUERA DEL FOR)
@@ -1936,11 +1995,11 @@ def panel(request: Request, sid: str = Query(...)):
     var circuloBusqueda = null;
     var heatCaso = null;
 
-    function buscarHogar() {
+        function buscarHogar() {
 
         var input = document.getElementById("buscarHogar");
         var valor = input.value.trim();
-        valor = valor.replace(/\\s+/g, "");
+        valor = valor.replace(/\s+/g, "");
 
         var mapa = Object.values(window).find(obj => obj instanceof L.Map);
 
@@ -1952,7 +2011,6 @@ def panel(request: Request, sid: str = Query(...)):
         // ===============================
         // LIMPIAR BUSQUEDA
         // ===============================
-
         if (valor === "") {
 
             if (circuloBusqueda) {
@@ -1971,7 +2029,6 @@ def panel(request: Request, sid: str = Query(...)):
         // ===============================
         // BUSCAR CORRELATIVO
         // ===============================
-
         if (hogares[valor]) {
 
             var lat = hogares[valor].lat;
@@ -1979,28 +2036,92 @@ def panel(request: Request, sid: str = Query(...)):
 
             mapa.setView([lat, lon], 18);
 
+            // ===============================
+            // 🔥 RESALTAR + ABRIR CLUSTER
+            // ===============================
+            mapa.eachLayer(function(layer) {
+
+                if (layer instanceof L.MarkerClusterGroup) {
+
+                    let target = null;
+
+                    layer.getLayers().forEach(function(m) {
+
+                        let el = m.getElement();
+                        if (!el) return;
+
+                        let texto = el.innerText || "";
+
+                        // 🔥 BUSCAR POR CORRELATIVO
+                        if (texto.includes(valor)) {
+
+                            target = m;
+
+                            el.style.opacity = "1";
+                            el.style.transform = "scale(1.5)";
+                            el.style.zIndex = 9999;
+
+                        } else {
+
+                            el.style.opacity = "0.2";
+                            el.style.transform = "scale(1)";
+                        }
+
+                    });
+
+                    // 🔥 ABRIR CLUSTER + DIBUJAR CÍRCULO BIEN
+                    if (target) {
+                        layer.zoomToShowLayer(target, function() {
+
+                            target.openPopup();
+
+                            let ll = target.getLatLng();
+
+                            // 🔥 BORRAR CÍRCULO ANTERIOR
+                            if (circuloBusqueda) {
+                                mapa.removeLayer(circuloBusqueda);
+                            }
+
+                            // 🔥 CREAR CÍRCULO BIEN POSICIONADO
+                            circuloBusqueda = L.circleMarker([ll.lat, ll.lng], {
+                                radius: 18,
+                                color: "red",
+                                fillColor: "yellow",
+                                fillOpacity: 0.9
+                            }).addTo(mapa);
+
+                            // 🔥 PARPADEO
+                            let visible = true;
+
+                            let intervalo = setInterval(() => {
+
+                                if (visible) {
+                                    mapa.removeLayer(circuloBusqueda);
+                                } else {
+                                    circuloBusqueda.addTo(mapa);
+                                }
+
+                                visible = !visible;
+
+                            }, 400);
+
+                            setTimeout(() => {
+                                clearInterval(intervalo);
+                                circuloBusqueda.addTo(mapa);
+                            }, 5000);
+
+                        });
+                    }
+                }
+
+            });
+
             console.log("correlativo:", valor);
             console.log("logs:", logsCasos[valor]);
 
             // ===============================
-            // CIRCULO
-            // ===============================
-
-            if (circuloBusqueda) {
-                mapa.removeLayer(circuloBusqueda);
-            }
-
-            circuloBusqueda = L.circle([lat, lon], {
-                color: 'red',
-                fillColor: '#ff0000',
-                fillOpacity: 0.3,
-                radius: 70
-            }).addTo(mapa);
-
-            // ===============================
             // LIMPIAR HEATMAP
             // ===============================
-
             if (heatCaso) {
                 mapa.removeLayer(heatCaso);
                 heatCaso = null;
@@ -2011,7 +2132,6 @@ def panel(request: Request, sid: str = Query(...)):
             alert("Correlativo no encontrado");
         }
     }
-
     // ===============================
     // EVENTOS
     // ===============================
