@@ -114,7 +114,6 @@ except Exception as e:
 
 
 
-
 # ===============================
 # FUNCIONES TOKEN
 # ===============================
@@ -238,9 +237,9 @@ def cerrar_panel(sid: str):
 
                     sids_usados.add(sid)
 
-# ===============================
-# ENDPOINT PRINCIPAL PANEL
-# ===============================
+    # ===============================
+    # ENDPOINT PRINCIPAL PANEL
+    # ===============================
 
 
 @app.get("/panel", response_class=HTMLResponse)
@@ -277,7 +276,7 @@ def panel(request: Request, sid: str = Query(...)):
     clave = usuario   # 🔥 CONTROL POR USUARIO REAL
 
     # ===============================
-    # 🔥 CONEXIÓN ORACLE (MOVER ACÁ)
+    #  CONEXIÓN ORACLE 
     # ===============================
     conn = cx_Oracle.connect(ORACLE_USER, ORACLE_PASS, ORACLE_DSN)
 
@@ -305,9 +304,9 @@ def panel(request: Request, sid: str = Query(...)):
 
     cursor.arraysize = 500
 
- # ===============================
-# DETECTAR SCHEMA
-# ===============================
+    # ===============================
+    # DETECTAR SCHEMA   
+    # ===============================
 
     schema = None
 
@@ -341,7 +340,7 @@ def panel(request: Request, sid: str = Query(...)):
 
 
 # ===============================
-# TRAER CONGLOMERADOS DEL ENCUESTADOR
+# TRAE CONGLOMERADOS DEL ENCUESTADOR
 # ===============================
 
     usuario = usuario.strip().upper()
@@ -354,14 +353,14 @@ def panel(request: Request, sid: str = Query(...)):
             LPAD(TRIM(DOMZONA),3,'0') AS CODCOMP
         FROM {schema}.DOMICILIOS
         WHERE TRIM(UPPER(DOMUSRENCUESTADOR)) = :usuario
-        AND TRIM(CFGENCUESTA) = :cfg   -- 🔥 ESTE FALTABA
+        AND TRIM(CFGENCUESTA) = :cfg   
     """
     df_cong = pd.read_sql(
         query_cong,
         conn,
         params={
             "usuario": usuario,
-            "cfg": encuesta   # 🔥 importante si agregaste CFGENCUESTA
+            "cfg": encuesta   # 
         }
     )
 
@@ -380,7 +379,7 @@ def panel(request: Request, sid: str = Query(...)):
     FROM {schema}.DOMICILIOS
     WHERE RTRIM(CFGENCUESTA) = :encuesta
     """, {"encuesta": encuesta})
-
+     
     row = cursor.fetchone()
     total_encuesta = row[0] if row else 0
 
@@ -390,7 +389,7 @@ def panel(request: Request, sid: str = Query(...)):
         <div style="
             position: fixed;
             top: 90px;
-            left: 50%;
+            left: 50%; 
             transform: translateX(-50%);
             background:#ffe6e6;
             padding:10px 20px;
@@ -403,7 +402,6 @@ def panel(request: Request, sid: str = Query(...)):
         </div>
         """
 
-     
     # ===============================
     # NOMBRE USUARIO
     # ===============================
@@ -419,7 +417,7 @@ def panel(request: Request, sid: str = Query(...)):
 
 
 
-          # ===============================
+    # ===============================
     # CONSULTA DOMICILIOS DEL USUARIO
     # ===============================
 
@@ -458,7 +456,7 @@ def panel(request: Request, sid: str = Query(...)):
 
     print("Filas encontradas:", len(rows))
 
-        # ===============================
+    # ===============================
     # VALIDAR USUARIO
     # ===============================
 
@@ -485,46 +483,84 @@ def panel(request: Request, sid: str = Query(...)):
 
     df_dom = pd.DataFrame(rows, columns=[col[0] for col in cursor.description])
 
-    # # ===============================
-    # # 📊 CAUSALES PARA GRÁFICO
-    # # ===============================
-    # schema_domicilios = schema
-    # schema_causas = "SMRPROD"
 
+    
+# ===============================
+# 📊 CAUSALES PARA GRÁFICO 
+# ===============================
 
-    # query_causales = f"""
-    # SELECT
-    #     d.DOMCAUSA,
-    #     CASE 
-    #         WHEN d.DOMCAUSA = 1 THEN 'Realizada'
-    #         ELSE c.CAUDESCRIPCION
-    #     END AS DESCRIPCION,
-    #     COUNT(*) AS CANTIDAD
-    # FROM {schema}.DOMICILIOS d
-    # LEFT JOIN {schema}.CAUSAS c 
-    #     ON c.CAUCODIGO = d.DOMCAUSA
-    #     AND c.CFGENCUESTA = d.CFGENCUESTA
-    # WHERE d.CFGENCUESTA = :encuesta
-    # AND TRIM(UPPER(d.DOMUSRENCUESTADOR)) = :usuario
-    # GROUP BY d.DOMCAUSA, 
-    #     CASE 
-    #         WHEN d.DOMCAUSA = 1 THEN 'Realizada'
-    #         ELSE c.CAUDESCRIPCION
-    #     END
-    # ORDER BY CANTIDAD DESC
-    # """
+    query_causales = f"""
+    SELECT
+        d.DOMCAUSA,
+        CASE 
+            WHEN d.DOMCAUSA = 1 THEN 'Realizada'
+            WHEN c.CAUDESCRIPCION IS NOT NULL THEN c.CAUDESCRIPCION
+            ELSE 'Causal ' || d.DOMCAUSA
+        END AS DESCRIPCION,
+        COUNT(*) AS CANTIDAD
+    FROM {schema}.DOMICILIOS d
+    LEFT JOIN {schema}.CAUSAS c 
+        ON c.CAUCODIGO = d.DOMCAUSA
+        AND (
+            TRIM(UPPER(c.CFGENCUESTA)) = TRIM(UPPER(:encuesta))
+            OR TRIM(UPPER(c.CFGENCUESTA)) = TRIM(UPPER(d.CFGENCUESTA))
+        )
+    WHERE TRIM(d.CFGENCUESTA) = :encuesta
+    AND TRIM(UPPER(d.DOMUSRENCUESTADOR)) = :usuario
+    GROUP BY 
+        d.DOMCAUSA,
+        CASE 
+            WHEN d.DOMCAUSA = 1 THEN 'Realizada'
+            WHEN c.CAUDESCRIPCION IS NOT NULL THEN c.CAUDESCRIPCION
+            ELSE 'Causal ' || d.DOMCAUSA
+        END
+    ORDER BY CANTIDAD DESC
+    """
+    # 🔥 EJECUTAR QUERY (IMPORTANTE: params)
+    df_causales = pd.read_sql(
+        query_causales,
+        conn,
+        params={
+            "encuesta": encuesta,
+            "usuario": usuario.upper().strip()
+        }
+    )
 
-    # df_causales = pd.read_sql(query_causales, conn, params={
-    #     "encuesta": encuesta,
-    #     "usuario": usuario
-    # })
+    # 🔥 LIMPIAR COLUMNAS (CLAVE CON ORACLE)
+    df_causales.columns = df_causales.columns.str.strip().str.upper()
 
-    # causales_dict = dict(zip(
-    #     df_causales["CAUDESCRIPCION"],
-    #     df_causales["CANTIDAD"]
-    # ))
+    # 🔥 DEBUG (opcional)
+    print("COLUMNAS CAUSALES:", df_causales.columns)
 
-    # causales_json = json.dumps(causales_dict)
+    # ===============================
+    # 🔥 PREPARAR JSON PARA JS
+    # ===============================
+
+    import json
+
+    labels = df_causales["DESCRIPCION"].tolist()
+    values = df_causales["CANTIDAD"].tolist()
+
+    causales_json = json.dumps({
+        "labels": labels,
+        "values": values
+    })
+
+    # ===============================
+    # 🔥 EJEMPLO PARA HTML / JS
+    # ===============================
+
+    html_grafico = f"""
+    <script>
+    var dataCausales = {causales_json};
+
+    console.log("Causales:", dataCausales);
+
+    // Ejemplo básico
+    var labels = dataCausales.labels;
+    var values = dataCausales.values;
+    </script>
+    """
 
 
     # ===============================
@@ -1335,9 +1371,9 @@ def panel(request: Request, sid: str = Query(...)):
     folium.GeoJson(geo_zonas_filtrado)
 
     # ===============================
-# 🟢 ZONAS DEL ENCUESTADOR (FIX FINAL)
-# ===============================
-    
+    # 🟢 ZONAS DEL ENCUESTADOR (FIX FINAL)
+    # ===============================
+        
     print("TOTAL GEO ORIGINAL:", len(geo_zonas["features"]))
     print("TOTAL GEO FILTRADO:", len(geo_zonas_filtrado["features"]))
 
@@ -1492,7 +1528,8 @@ def panel(request: Request, sid: str = Query(...)):
 
     </script>
     """))
-        # ===============================
+    
+    # ===============================
     # HEATMAP SOLO DEL CASO BUSCADO
     # ===============================
 
@@ -1517,7 +1554,6 @@ def panel(request: Request, sid: str = Query(...)):
 
             heat_caso = df_caso[["LAT_LOG","LON_LOG"]].values.tolist()
             print("🔥 heat_caso:", len(heat_caso)) 
-
 
 
     # ===============================
@@ -1593,12 +1629,10 @@ def panel(request: Request, sid: str = Query(...)):
                 #).add_to(fg_heat_caso)
 
 
-
-    
-
     fg_heat_presencial.add_to(mapa)
     fg_heat_telefonico.add_to(mapa)
     fg_heat_caso.add_to(mapa)
+    
     # ===============================
     # CAPAS POR MODALIDAD
     # ===============================
@@ -1760,6 +1794,7 @@ def panel(request: Request, sid: str = Query(...)):
                 </div>
             """)
         ).add_to(destino)
+        
     # ===============================
     # AGREGAR CAPAS AL MAPA (FUERA DEL FOR)
     # ===============================
@@ -1773,8 +1808,8 @@ def panel(request: Request, sid: str = Query(...)):
     ).add_to(mapa)
     
     # ===============================
-# TITULO SUPERIOR
-# ===============================
+    # TITULO SUPERIOR
+    # ===============================
 
     titulo_html = f"""
             <h3 style="text-align:center; margin-top:10px;">
@@ -1840,13 +1875,9 @@ def panel(request: Request, sid: str = Query(...)):
 """))
 
 
-   # ===============================
-# BUSCADOR MOVIBLE
-# ===============================
-
     # ===============================
-# BUSCADOR MOVIBLE (SIN F-STRING)
-# ===============================
+    # BUSCADOR MOVIBLE (SIN F-STRING)
+    # ===============================
 
     coords_json = json.dumps(coords_por_hogar)
     logs_json = json.dumps(coords_log_por_caso)
@@ -2223,24 +2254,33 @@ def panel(request: Request, sid: str = Query(...)):
         </table>
     </div>
     
-    <!-- PANEL CAUSALES -->
-    <div id="panelCausales" style="
-        display:none;
-        position: fixed;
-        bottom: 160px;
-        right: 20px;
-        background:white;
-        padding:15px;
-        border-radius:10px;
-        box-shadow:0 4px 12px rgba(0,0,0,0.3);
-        min-width:420px;
-        z-index:9999;">
+        <!-- PANEL CAUSALES -->
+        <div id="panelCausales" style="
+            display:none;
+            position: fixed;
+            bottom: 160px;
+            right: 20px;
+            background:white;
+            padding:15px;
+            border-radius:10px;
+            box-shadow:0 4px 12px rgba(0,0,0,0.3);
+
+            width:900px;              /* 🔥 MÁS ANCHO */
+            height:500px;             /* 🔥 MÁS ALTO */
+
+            max-height:80vh;          /* 🔥 adaptable pantalla */
+            overflow:auto;            /* 🔥 SCROLL en vez de cortar */
+
+            z-index:9999;
+        ">
 
         <div style="font-weight:bold; margin-bottom:10px; text-align:center;">
             📊 Desglose por Causales
         </div>
 
-        <canvas id="graficoCausales" style="width:100%; height:250px;"></canvas>
+        <div style="width:100%; overflow-x:auto;">
+    <canvas id="graficoCausales" style="min-width:1200px; height:400px;"></canvas>
+        </div>
 
     </div>
 
@@ -2301,10 +2341,155 @@ def panel(request: Request, sid: str = Query(...)):
     </div>
 
 
-   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
-    <script>
+<script>
 
+function toggleCausales() {{
+
+    document.getElementById("panelEstados").style.display = "none";
+    document.getElementById("panelActividad").style.display = "none";
+    document.getElementById("panelMetadata").style.display = "none";
+
+    const panel = document.getElementById("panelCausales");
+    const abrir = panel.style.display === "none";
+    panel.style.display = abrir ? "block" : "none";
+
+    if (abrir) {{
+
+        var canvas = document.getElementById("graficoCausales");
+
+        if (!canvas) {{
+            console.log("NO EXISTE canvas");
+            return;
+        }}
+
+        if (window.miGrafico) {{
+            window.miGrafico.destroy();
+        }}
+
+        var dataCausales = {causales_json};
+
+        let labels = dataCausales.labels;
+        let valores = dataCausales.values;
+
+        // ===============================
+        // 🔥 FILTRAR + ORDENAR
+        // ===============================
+        let combinado = labels.map((l, i) => ({{
+            label: l,
+            valor: valores[i]
+        }}));
+
+        combinado = combinado.filter(x => x.valor > 0);
+        combinado.sort((a, b) => b.valor - a.valor);
+
+        labels = combinado.map(x => x.label);
+        valores = combinado.map(x => x.valor);
+
+        // ===============================
+        // ✂️ CORTAR TEXTO LARGO
+        // ===============================
+        labels = labels.map(l => {{
+            if (l.length > 30) {{
+                return l.substring(0, 30) + '...';
+            }}
+            return l;
+        }});
+
+        // ===============================
+        // 🎨 COLORES AUTOMÁTICOS
+        // ===============================
+        let colores = labels.map((_, i) => {{
+            let hue = (i * 35) % 360;
+            return `hsl(${{hue}}, 60%, 60%)`;
+        }});
+
+        // ===============================
+        // 📊 GRAFICO
+        // ===============================
+        window.miGrafico = new Chart(canvas, {{
+            type: 'bar',
+            data: {{
+                labels: labels,
+                datasets: [{{
+                    label: 'Cantidad',
+                    data: valores,
+                    backgroundColor: colores,
+                    borderColor: "#333",
+                    borderWidth: 1,
+                    barThickness: 18,
+                    categoryPercentage: 0.7,
+                    barPercentage: 0.8
+                }}]
+            }},
+            options: {{
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+
+                layout: {{
+                    padding: {{
+                        left: 30
+                    }}
+                }},
+
+                plugins: {{
+                    legend: {{ display: false }},
+                    tooltip: {{
+                        callbacks: {{
+                            label: function(context) {{
+                                return "Cantidad: " + context.raw;
+                            }}
+                        }}
+                    }}
+                }},
+
+                scales: {{
+                    x: {{
+                        beginAtZero: true
+                    }},
+                    y: {{
+                        ticks: {{
+                            autoSkip: false,
+                            font: {{
+                                size: 11,
+                                weight: 'bold'
+                            }}
+                        }}
+                    }}
+                }}
+            }},
+
+            // ===============================
+            // 🔥 VALORES EN LAS BARRAS
+            // ===============================
+            plugins: [{{
+                id: 'labels',
+                afterDatasetsDraw(chart) {{
+
+                    const ctx = chart.ctx;
+
+                    chart.data.datasets.forEach((dataset, i) => {{
+                        const meta = chart.getDatasetMeta(i);
+
+                        meta.data.forEach((bar, index) => {{
+
+                            let value = dataset.data[index];
+
+                            ctx.fillStyle = '#000';
+                            ctx.font = 'bold 11px sans-serif';
+                            ctx.textAlign = 'left';
+
+                            ctx.fillText(value, bar.x + 5, bar.y + 4);
+                        }});
+                    }});
+                }}
+            }}]
+
+        }});
+    }}
+}}
 
 let estadosActivos = new Set();
 
@@ -2328,76 +2513,6 @@ function toggleMetadata() {{
     const meta = document.getElementById("panelMetadata");
     meta.style.display = meta.style.display === "none" ? "block" : "none";
 }}
-
-
-    function toggleCausales() {{
-
-        document.getElementById("panelEstados").style.display = "none";
-        document.getElementById("panelActividad").style.display = "none";
-        document.getElementById("panelMetadata").style.display = "none";
-
-        const panel = document.getElementById("panelCausales");
-
-        const abrir = panel.style.display === "none";
-
-        panel.style.display = abrir ? "block" : "none";
-
-        // 🔥 CREAR GRAFICO
-        if (abrir) {{
-
-            var canvas = document.getElementById("graficoCausales");
-
-            if (!canvas) {{
-                console.log("NO EXISTE canvas");
-                return;
-            }}
-
-            // 🔥 limpiar si ya existe
-            if (window.miGrafico) {{
-                window.miGrafico.destroy();
-            }}
-             
-            # var dataCausales = {causales_json};
-
-            // 🔥 COLORES DINÁMICOS
-            let labels = Object.keys(dataCausales);
-
-            let colores = labels.map(l => {{
-
-                let txt = l.toLowerCase();
-
-                if (txt.includes("realizada")) return "#28a745";   // verde
-                if (txt.includes("rechazo")) return "#dc3545";     // rojo
-                if (txt.includes("no contacto")) return "#fd7e14"; // naranja
-                if (txt.includes("visitas")) return "#ffc107";     // amarillo
-                if (txt.includes("ausencia")) return "#0dcaf0";    // celeste
-
-                return "#0d6efd"; // azul default
-
-            }});
-
-            window.miGrafico = new Chart(canvas, {{
-                type: 'bar',
-                data: {{
-                    labels: labels,
-                    datasets: [{{
-                        label: 'Cantidad',
-                        data: Object.values(dataCausales),
-                        backgroundColor: colores,
-                        borderColor: "#333",
-                        borderWidth: 1
-                    }}]
-                }},
-                options: {{
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {{
-                        legend: {{ display: false }}
-                    }}
-                }}
-            }});
-        }}
-    }}
 
 function filtrarEstado(estado) {{
 
@@ -2437,10 +2552,6 @@ function aplicarFiltroEstado() {{
         }}
 
      
-
-
-
-
 
         let visible = false;
 
@@ -2507,7 +2618,9 @@ function aplicarFiltroEstado() {{
         top:0;
         left:0;
         width:100%;
-        height:100%;
+        height:300%;
+        max-height:300px;
+        overflow:hidden;
         background:white;
         z-index:99999;
         display:flex;
