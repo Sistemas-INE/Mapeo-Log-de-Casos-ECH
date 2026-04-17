@@ -16,7 +16,9 @@ import os
 from dotenv import load_dotenv
 import base64
 import uuid
-print("🔥🔥🔥 API_PANEL CORRIENDO 🔥🔥🔥")
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+print("ARCHIVO CORRECTO EJECUTANDO")
 
 # ===============================
 # CARGAR CALLES
@@ -28,11 +30,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ruta_geo = os.path.join(
     BASE_DIR,
     "zonas_ejes_para_webmap_smr",
-    "ejes_ide_24022026.geojson"
+    "ejes_ide_simplificado.geojson"  # ✅ el simplificado
 )
 
-with open(ruta_geo, "r", encoding="utf-8") as f:
-    geo_calles = json.load(f)
+# with open(ruta_geo, "r", encoding="utf-8") as f:
+#     geo_calles = json.load(f)
 
 
 
@@ -49,24 +51,24 @@ ruta_zonas = os.path.join(
 with open(ruta_zonas, "r", encoding="utf-8") as f:
     geo_zonas = json.load(f)
 
-print("✅ Zonas cargadas:", len(geo_zonas["features"]))
+print("[OK] Zonas cargadas:", len(geo_zonas["features"]))
 
 # ===============================
 # 🔥 PREPARAR GEOJSON (OBLIGATORIO)
 # ===============================
 geo_zonas_str = json.dumps(geo_zonas)
-geo_calles_str = json.dumps(geo_calles)
+# geo_calles_str = json.dumps(geo_calles)
 
 
 # ===============================
 # CONTROL DE SESIONES (CRÍTICO)
 # ===============================
 
-sesiones = {}             # 🔐 SID → token
-usuarios_activos = {}     # 👤 IP → lista de SID activos
-sids_usados = set()       # 🚫 SIDs abiertos (evita duplicar pestañas)
-
-MAX_SESIONES = 3          # 🔒 Máximo paneles abiertos por usuario
+# sesiones = {}             # 🔐 SID → token
+# usuarios_activos = {}     # 👤 IP → lista de SID activos
+# sids_usados = set()       # 🚫 SIDs abiertos (evita duplicar pestañas)
+tokens_usados = set()
+MAX_SESIONES = 3            # 🔒 Máximo paneles abiertos por usuario
 
 # ===============================
 # CARGAR VARIABLES
@@ -83,9 +85,23 @@ fernet = Fernet(SECRET_KEY)
 
 app = FastAPI()
 
-#from fastapi.middleware.gzip import GZipMiddleware 
+from fastapi.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
-#app.add_middleware(GZipMiddleware, minimum_size=1000)
+import re as _re
+with open(ruta_geo, "r", encoding="utf-8") as _f:
+    _geo_calles_min = _f.read()
+_geo_calles_min = _re.sub(r'\s+', ' ', _geo_calles_min)
+
+from fastapi.responses import Response
+
+@app.get("/ejes_geojson")
+def ejes_geojson():
+    return Response(
+        content=_geo_calles_min,
+        media_type="application/json",
+        headers={"Cache-Control": "public, max-age=86400"}
+    )
 
 # ===============================
 # FUNCION NORMALIZAR CODCOMP 🔥
@@ -119,29 +135,35 @@ except Exception as e:
 # ===============================
 
 def desencriptar_token(token):
-
+    
     try:
-
         datos = fernet.decrypt(token.encode())
         parametros = json.loads(datos.decode())
+
+        # 🔥 validar expiración
+        import time
+      
+
+        if not parametros.get("exp") or parametros["exp"] < time.time():
+            return None
 
         return parametros
 
     except:
         return None
 
-
+import time
 def generar_token(encuesta, usuario, correlativo=None, modalidad=None):
 
     datos = {
         "encuesta": encuesta,
         "usuario": usuario,
         "correlativo": correlativo,
-        "modalidad": modalidad
+        "modalidad": modalidad,
+        "exp": time.time() + 3600
     }
 
     token = fernet.encrypt(json.dumps(datos).encode())
-
     return token.decode()
 
 
@@ -156,86 +178,51 @@ def login_panel(request: Request, token: str):
         decoded = base64.b64decode(token).decode()
         parts = decoded.split("|")
 
+        print(f"🔍 Token decodificado: '{decoded}'")
+        print(f"🔍 Partes: {parts}")
+
         encuesta = parts[0]
         usuario = parts[1]
         correlativo = parts[2] if len(parts) > 2 else None
 
-    except:
+        print(f"🔍 encuesta='{encuesta}' | usuario='{usuario}' | correlativo='{correlativo}'")
+
+    except Exception as e:
+        print(f"❌ Error decodificando token: {e}")
         return {"error": "token inválido"}
 
-    ip = request.client.host
-    clave = ip   # 🔥 CONTROL GLOBAL POR USUARIO/NAVEGADOR
-
-    # crear registro usuario
-    if clave not in usuarios_activos:
-        usuarios_activos[clave] = []
-
-    # limpiar sesiones inexistentes
-    usuarios_activos[clave] = [
-        s for s in usuarios_activos[clave] if s in sesiones
-    ]
-
-     
-    # 🔥 LIMPIAR SESIONES ROTAS (CLAVE)
-    usuarios_activos[clave] = [
-        s for s in usuarios_activos[clave]
-        if s in sesiones and s not in sids_usados
-    ]
-
-     
-    # 🔒 límite máximo
-    if len(usuarios_activos[clave]) >= 3:
-
-        return HTMLResponse(
-            f"""
-            <h3>Límite de sesiones alcanzado</h3>
-             YA  tiene 3 paneles abiertos.<br>
-            Cierre uno antes de abrir otro.
-            """
-        )
-
-    # crear nueva sesión
+    # generar token seguro (encriptado)
     token_seguro = generar_token(encuesta, usuario, correlativo)
 
-    sid = str(uuid.uuid4())
+    return RedirectResponse(
+        url=f"/panel?token={token_seguro}",
+        status_code=302
+    )
 
-    sesiones[sid] = token_seguro
-    usuarios_activos[clave].append(sid)
-
-    print("SID creado:", sid)
-    print("Sesiones activas:", usuarios_activos)
-
-    return RedirectResponse(url=f"/panel?sid={sid}", status_code=302)
-
-
-#@app.get("/cerrar_panel")
-@app.api_route("/cerrar_panel", methods=["GET", "POST"])
+# #@app.get("/cerrar_panel")
+# @app.api_route("/cerrar_panel", methods=["GET", "POST"])
 
 
                 
-def cerrar_panel(sid: str):
+# def cerrar_panel(sid: str):
+    
+#     if sid in sesiones:
 
-                    if sid in sesiones:
+#         token = sesiones.pop(sid)
 
-                        token = sesiones.pop(sid)
+#         datos = desencriptar_token(token)
 
-                        datos = desencriptar_token(token)
+#         if datos:
+#             usuario = datos.get("usuario")
 
-                        if datos:
-                            usuario = datos.get("usuario")
+#             for clave in usuarios_activos:
+#                 if sid in usuarios_activos[clave]:
+#                     usuarios_activos[clave].remove(sid)
 
-                            for clave in usuarios_activos:
-                                if sid in usuarios_activos[clave]:
-                                    usuarios_activos[clave].remove(sid)
-
-                    # 🔥 AGREGAR ESTO (CLAVE)
-                    # 🔥 limpiar si quedó colgado
-                    
-                    if sid in sids_usados:
-                        print("⚠ SID colgado en panel, lo libero:", sid)
-                        sids_usados.discard(sid)
-
-                    sids_usados.add(sid)
+#     # limpiar si quedó colgado
+#     if sid in sids_usados:
+#         print("⚠ SID colgado en panel, lo libero:", sid)
+#         sids_usados.discard(sid)
 
     # ===============================
     # ENDPOINT PRINCIPAL PANEL
@@ -243,7 +230,18 @@ def cerrar_panel(sid: str):
 
 
 @app.get("/panel", response_class=HTMLResponse)
-def panel(request: Request, sid: str = Query(...)):
+def panel(request: Request, token: str = Query(...)):
+
+    if token in tokens_usados:
+        return HTMLResponse("⚠ Token ya utilizado")
+    
+    datos = desencriptar_token(token)
+
+    if not datos:
+        return HTMLResponse("Sesión expirada")
+
+    # 🔥 recién acá
+    tokens_usados.add(token)
 
     coords_log_por_caso = {}
 
@@ -251,29 +249,28 @@ def panel(request: Request, sid: str = Query(...)):
     # VALIDAR SIDd
     # ===============================
 
-    if sid not in sesiones:
-        return HTMLResponse("⚠ Sesión inválida")
+    # datos = desencriptar_token(token)
 
-    # 🔒 EVITAR MISMO SID EN 2 PESTAÑAS
-    if sid in sids_usados:
-        return HTMLResponse("⚠ Esta sesión ya está abierta en otra pestaña")
-
-    sids_usados.add(sid)
+    # if not datos:
+    #         return HTMLResponse("⚠ Sesión inválida")
 
     # ===============================
     # DESENCRIPTAR TOKEN
     # ===============================
 
-    token = sesiones[sid]
-
     datos = desencriptar_token(token)
+    tokens_usados.add(token)
 
     if not datos:
-        return HTMLResponse("Token inválido")
+        return HTMLResponse("""
+            <div style="text-align:center; margin-top:50px;">
+                <h2>⏰ Sesión expirada</h2>
+                <p>El acceso venció. Volvé a abrir el panel desde el sistema.</p>
+            </div>
+        """)
 
     usuario = datos.get("usuario")
     usuario = usuario.strip().upper() if usuario else None
-    clave = usuario   # 🔥 CONTROL POR USUARIO REAL
 
     # ===============================
     #  CONEXIÓN ORACLE 
@@ -370,7 +367,7 @@ def panel(request: Request, sid: str = Query(...)):
   
     
 
-    # ===============================
+        # ===============================
     # VALIDAR ENCUESTA
     # ===============================
 
@@ -401,6 +398,7 @@ def panel(request: Request, sid: str = Query(...)):
             ⚠ Encuesta <b>{encuesta}</b> no existe
         </div>
         """
+        
 
     # ===============================
     # NOMBRE USUARIO
@@ -445,7 +443,7 @@ def panel(request: Request, sid: str = Query(...)):
         "usuario": usuario
     }
 
-    # si viene correlativo agregamos filtro
+  # si viene correlativo agregamos filtro
     if correlativo:
         sql += " AND TRIM(d.DOMCORRELATIVO) = :correlativo"
         params["correlativo"] = correlativo
@@ -455,13 +453,11 @@ def panel(request: Request, sid: str = Query(...)):
     rows = cursor.fetchall()
 
     print("Filas encontradas:", len(rows))
-
-    # ===============================
-    # VALIDAR USUARIO
-    # ===============================
-
+    
+        # ===============================
+        # VALIDAR USUARIO
+        # ===============================
     if len(rows) == 0:
-
         mensaje_error += f"""
         <div style="
             position: fixed;
@@ -475,15 +471,22 @@ def panel(request: Request, sid: str = Query(...)):
             z-index:9999;
             font-size:14px;">
             ⚠ Usuario <b>{usuario}</b> no tiene domicilios en esta encuesta
+            {f'- Correlativo: <b>{correlativo}</b>' if correlativo else ''}
         </div>
         """
+
     print("Encuesta:", encuesta)
     print("Usuario:", usuario)
     print("Correlativo:", correlativo)
 
+    # ✅ SIEMPRE fuera del if - se ejecuta con rows vacío o no
     df_dom = pd.DataFrame(rows, columns=[col[0] for col in cursor.description])
 
-
+    # ✅ Avisar en consola
+    if df_dom.empty:
+        print("⚠️ df_dom vacío")
+    else:
+        print(f"✅ df_dom cargado: {len(df_dom)} filas")
     
 # ===============================
 # 📊 CAUSALES PARA GRÁFICO 
@@ -718,12 +721,15 @@ def panel(request: Request, sid: str = Query(...)):
     # FILTRO POR CORRELATIVO
     # ===============================
 
+    # if correlativo and correlativo.upper() != "TODO":
+    #     df_dom["DOMCORRELATIVO"] = df_dom["DOMCORRELATIVO"].astype(str).str.strip()
+    #     correlativo = correlativo.strip()
+    #     df_dom = df_dom[df_dom["DOMCORRELATIVO"] == correlativo]
+
     if correlativo and correlativo.upper() != "TODO":
-        df_dom["DOMCORRELATIVO"] = df_dom["DOMCORRELATIVO"].astype(str).str.strip()
-        correlativo = correlativo.strip()
-        df_dom = df_dom[df_dom["DOMCORRELATIVO"] == correlativo]
-
-
+            df_dom["DOMCORRELATIVO"] = df_dom["DOMCORRELATIVO"].astype(str).str.strip()
+            correlativo = correlativo.strip()
+            df_dom = df_dom[df_dom["DOMCORRELATIVO"] == correlativo]
     # ===============================
     # FILTRO POR MODALIDAD
     # ===============================
@@ -744,6 +750,26 @@ def panel(request: Request, sid: str = Query(...)):
     # -------------------------------
     # Diagnóstico: total logs usuario
     # -------------------------------
+    # cursor.execute(f"""
+    # SELECT
+    #     DOMCORRELATIVO,
+    #     LOGTIPO,
+    #     LOGFECHAHORA,
+    #     LOGACCION,
+    #     LOGUBICACION
+    # FROM {schema}.LOG
+    # WHERE RTRIM(CFGENCUESTA) = :cfg
+    # AND (
+    #         RTRIM(LOGDOMUSUARIO) = :usuario
+    #     OR RTRIM(LOGUSRUSUARIO) = :usuario
+    # )
+    # AND LOGUBICACION IS NOT NULL
+    # ORDER BY LOGFECHAHORA
+    # """, {
+    #     "cfg": encuesta,
+    #     "usuario": usuario
+    # })
+    
     cursor.execute(f"""
     SELECT
         DOMCORRELATIVO,
@@ -758,11 +784,16 @@ def panel(request: Request, sid: str = Query(...)):
         OR RTRIM(LOGUSRUSUARIO) = :usuario
     )
     AND LOGUBICACION IS NOT NULL
+    AND TRIM(LOGUBICACION) != ' '
+    AND LOGUBICACION LIKE '%,%'
     ORDER BY LOGFECHAHORA
     """, {
         "cfg": encuesta,
         "usuario": usuario
     })
+        
+    
+    
 
     rows_log = cursor.fetchall()
 
@@ -970,10 +1001,13 @@ def panel(request: Request, sid: str = Query(...)):
 
     if df_dom.empty:
 
-        mapa = folium.Map(
-            location=[-34.90, -56.16],  # Montevideo
-            zoom_start=6
-        )
+        if df_dom.empty:
+    
+            mapa = folium.Map(
+                location=[-34.90, -56.16],  # Montevideo
+                zoom_start=6,
+                prefer_canvas=True
+            )
 
 
     # ===============================
@@ -1180,39 +1214,144 @@ def panel(request: Request, sid: str = Query(...)):
     location=centro,
     zoom_start=10,
     tiles="OpenStreetMap",
-    control_scale=True
+    control_scale=True,
+    prefer_canvas=True
 )
+
+    # # ===============================
+    # # 🛣️ CAPA CALLES PRO
+    # # ===============================
+    fg_calles = folium.FeatureGroup(name="🛣️ Ejes IDE", show=False)
+    fg_calles.add_to(mapa)
 
     # ===============================
     # 🛣️ CAPA CALLES PRO
     # ===============================
-
-    fg_calles = folium.FeatureGroup(
-        name="🛣️ Ejes IDE",
-        show=False
-    )
-
-    folium.GeoJson(
-        geo_calles,
-        style_function=lambda f: {
-            "color": "#4a90e2",
-            "weight": 2.5,
-            "opacity": 0.7
-        },
-        highlight_function=lambda f: {
-            "color": "#00ffff",
-            "weight": 6,
-            "opacity": 1
-
-        },
-        tooltip=folium.GeoJsonTooltip(
-            fields=["nombre"],  # o "NOMBRE"
-            aliases=["Calle IDE:"],
-            sticky=True
-        )
-    ).add_to(fg_calles)
-
+    fg_calles = folium.FeatureGroup(name="🛣️ Ejes IDE", show=False)
     fg_calles.add_to(mapa)
+
+    mapa.get_root().html.add_child(folium.Element("""
+    <script>
+    var ejesLayer = null;
+    var ejesCargados = false;
+    var ejesCargando = false;
+
+    function intentarRegistrarEjes() {
+        var mapaL = null;
+        for (var key in window) {
+            try {
+                if (window[key] && window[key]._leaflet_id && window[key].on) {
+                    mapaL = window[key];
+                    break;
+                }
+            } catch(e) {}
+        }
+
+        if (!mapaL) {
+            setTimeout(intentarRegistrarEjes, 500);
+            return;
+        }
+
+        console.log("✅ Mapa encontrado, registrando eventos ejes");
+
+        mapaL.on('overlayadd', function(e) {
+            console.log("overlayadd:", e.name);
+            if (!e.name || e.name.indexOf("Ejes") === -1) return;
+            if (ejesCargados || ejesCargando) return;
+
+            ejesCargando = true;
+            console.log("🛣️ Fetch ejes iniciado...");
+
+            fetch('/ejes_geojson')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    ejesLayer = L.geoJSON(data, {
+                        style: {
+                            color: '#4a90e2',
+                            weight: 1.5,
+                            opacity: 0.7
+                        },
+                        onEachFeature: function(f, layer) {
+
+                            // ✅ Tooltip con nombre de calle
+                            if (f.properties && f.properties.nombre) {
+                                layer.bindTooltip(f.properties.nombre, {sticky: true});
+                            }
+
+                            // ✅ Hover turquesa
+                            layer.on('mouseover', function() {
+                                layer.setStyle({
+                                    color: '#00ffff',
+                                    weight: 4,
+                                    opacity: 1
+                                });
+                            });
+
+                            // ✅ Volver al estilo original al salir
+                            layer.on('mouseout', function() {
+                                layer.setStyle({
+                                    color: '#4a90e2',
+                                    weight: 1.5,
+                                    opacity: 0.7
+                                });
+                            });
+                        }
+                    }).addTo(mapaL);
+                    ejesCargados = true;
+                    ejesCargando = false;
+                    console.log("✅ Ejes renderizados");
+                })
+                .catch(function(err) {
+                    ejesCargando = false;
+                    console.error("❌ Error ejes:", err);
+                });
+        });
+
+        mapaL.on('overlayremove', function(e) {
+            if (!e.name || e.name.indexOf("Ejes") === -1) return;
+            if (ejesLayer) {
+                mapaL.removeLayer(ejesLayer);
+                ejesLayer = null;
+                ejesCargados = false;
+                console.log("🗑️ Ejes removidos");
+            }
+        });
+    }
+
+    window.addEventListener('load', function() {
+        setTimeout(intentarRegistrarEjes, 1000);
+    });
+    </script>
+    """))
+
+    # fg_calles = folium.FeatureGroup(
+    #         name="🛣️ Ejes IDE",
+    #         show=False
+    #     )
+
+    # folium.GeoJson(
+    #     geo_calles,
+    #     style_function=lambda f: {
+    #         "color": "#4a90e2",
+    #         "weight": 2.5,
+    #         "opacity": 0.7
+    #     },
+    #     highlight_function=lambda f: {
+    #         "color": "#00ffff",
+    #         "weight": 6,
+    #         "opacity": 1
+
+    #     },
+    #     tooltip=folium.GeoJsonTooltip(
+    #         fields=["nombre"],  # o "NOMBRE"
+    #         aliases=["Calle IDE:"],
+    #         sticky=True
+    #     )
+    # ).add_to(fg_calles)
+
+    # fg_calles.add_to(mapa)
+    
+    
 
 
     mapa.get_root().html.add_child(folium.Element("""
@@ -1368,7 +1507,7 @@ def panel(request: Request, sid: str = Query(...)):
 
 
     #fg_zonas_total.add_to(mapa)
-    folium.GeoJson(geo_zonas_filtrado)
+    # folium.GeoJson(geo_zonas_filtrado)
 
     # ===============================
     # 🟢 ZONAS DEL ENCUESTADOR (FIX FINAL)
@@ -2850,18 +2989,37 @@ function aplicarFiltroEstado() {{
     mapa.get_root().html.add_child(folium.Element(loading_html))
 
     html = mapa.get_root().render()
+    html = mapa.get_root().render()
 
-    html += f"""
+    html += """
     <script>
-    function cerrarSesion() {{
-        navigator.sendBeacon("/cerrar_panel?sid={sid}");
-    }}
 
-    window.addEventListener("beforeunload", cerrarSesion);
-    window.addEventListener("pagehide", cerrarSesion);
+    let clave = "paneles_abiertos";
+    let abiertos = parseInt(localStorage.getItem(clave) || "0");
+
+    // validar límite
+    if (abiertos >= 3) {
+        alert("Ya tenés 3 paneles abiertos.");
+        document.body.innerHTML = "<h3 style='text-align:center;margin-top:50px;'>Cerrá un panel antes de abrir otro</h3>";
+    } else {
+        abiertos += 1;
+        localStorage.setItem(clave, abiertos);
+    }
+
+    // liberar al cerrar
+    window.addEventListener("beforeunload", () => {
+        let abiertos = parseInt(localStorage.getItem(clave) || "1");
+        abiertos -= 1;
+        if (abiertos <= 0) {
+            localStorage.removeItem(clave);
+        } else {
+            localStorage.setItem(clave, abiertos);
+        }
+    });
+
     </script>
     """
+        
 
-    html = html.replace("__SID__", sid)
 
     return HTMLResponse(content=html)
